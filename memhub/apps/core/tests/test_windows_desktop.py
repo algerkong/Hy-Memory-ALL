@@ -8,10 +8,13 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
 
+from one_memory import file_imports
 from one_memory.config import Settings
 from one_memory.database_access import main_database
 from one_memory.file_imports import (
@@ -90,6 +93,45 @@ def test_windows_open_algorithm_binds_the_authorized_file(tmp_path, monkeypatch)
         access._open_windows_relative_file(source)
 
 
+@pytest.mark.parametrize("changed_path", [False, True])
+def test_windows_private_record_compares_each_metadata_api_independently(
+    tmp_path, monkeypatch, changed_path
+):
+    target = tmp_path / "credential"
+    target.write_bytes(b"private")
+    details = target.stat()
+    values = {
+        key: getattr(details, key)
+        for key in (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mode",
+            "st_nlink",
+            "st_uid",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+    }
+    handle_info = SimpleNamespace(**(values | {"st_ctime_ns": details.st_ctime_ns + 1}))
+    current = SimpleNamespace(**(values | {"st_ctime_ns": details.st_ctime_ns + int(changed_path)}))
+    path = Mock(spec=Path)
+    path.lstat.side_effect = [details, current]
+    monkeypatch.setattr(file_imports, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(
+        file_imports, "os", SimpleNamespace(**(vars(os) | {"fstat": lambda _: handle_info}))
+    )
+    monkeypatch.setattr(file_imports, "assert_private_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        file_imports, "open_windows_path", lambda *args, **kwargs: os.open(target, os.O_RDONLY)
+    )
+    if changed_path:
+        with pytest.raises(ValueError, match="changed_import_operation_file"):
+            _read_private_record(path)
+    else:
+        assert _read_private_record(path) == b"private"
+
+
 @windows
 def test_native_private_paths_and_root_refusal(tmp_path):
     directory = tmp_path / "memory \u6d4b\u8bd5"
@@ -97,6 +139,7 @@ def test_native_private_paths_and_root_refusal(tmp_path):
     protect_private_path(directory, directory=True)
     token = directory / "credential"
     token.write_text("private", encoding="utf-8")
+    protect_private_path(token, directory=False)
     assert_private_path(directory, directory=True)
     assert_private_path(token, directory=False)
     assert _read_private_record(token) == b"private"

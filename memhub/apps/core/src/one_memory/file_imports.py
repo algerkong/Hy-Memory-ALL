@@ -144,6 +144,17 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _record_metadata(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_mode,
+        info.st_nlink,
+        info.st_uid,
+    )
+
+
 def _read_private_record(path: Path) -> bytes:
     before = path.lstat()
     if sys.platform == "win32":
@@ -161,23 +172,22 @@ def _read_private_record(path: Path) -> bytes:
             or (sys.platform != "win32" and info.st_mode & 0o077)
             or (hasattr(os, "getuid") and info.st_uid != os.getuid())
             or info.st_size > 16_384
+            or before.st_size != info.st_size
             or (before.st_dev, before.st_ino) != (info.st_dev, info.st_ino)
         ):
             raise ValueError("invalid_import_operation_file")
         contents = source.read(16_385)
         after = os.fstat(source.fileno())
         current = path.lstat()
+        # Windows path and handle queries can report different change times.
+        # Compare each snapshot using the same API, without relaxing identity.
+        expected_path = before if sys.platform == "win32" else after
         if (
             len(contents) > 16_384
-            or (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink)
-            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_mode, after.st_nlink)
+            or _record_metadata(info) != _record_metadata(after)
             or current.st_ino != info.st_ino
             or current.st_dev != info.st_dev
-            or current.st_mode != after.st_mode
-            or current.st_nlink != after.st_nlink
-            or current.st_uid != after.st_uid
-            or current.st_mtime_ns != after.st_mtime_ns
-            or current.st_ctime_ns != after.st_ctime_ns
+            or _record_metadata(current) != _record_metadata(expected_path)
             or stat.S_ISLNK(current.st_mode)
         ):
             raise ValueError("changed_import_operation_file")
