@@ -223,16 +223,20 @@ public static class MemHubPrivatePaths {
 while ($null -ne ($line = [Console]::ReadLine())) {
   $request = $null
   $pins = $null
+  $stage = 'request'
   try {
     $request = $line | ConvertFrom-Json
     $target = [string]$request.target
     $directory = [bool]$request.directory
+    $stage = 'pin'
     $pins = [MemHubPrivatePaths]::Pin($target, $directory)
+    $stage = 'read'
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = Get-Acl -LiteralPath $target
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @($sid.Value, '${SYSTEM_SID}', '${ADMINISTRATORS_SID}')) { throw 'owner' }
     if ($request.protect) {
+      $stage = 'protect'
       if ($directory) { $acl = New-Object System.Security.AccessControl.DirectorySecurity }
       else { $acl = New-Object System.Security.AccessControl.FileSecurity }
       $acl.SetOwner($sid)
@@ -249,6 +253,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
       $acl = Get-Acl -LiteralPath $target
       $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     }
+    $stage = 'verify'
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {
       @{ sid = $_.IdentityReference.Value; allow = ($_.AccessControlType -eq 'Allow');
          rights = [int]$_.FileSystemRights; inherit_only = (($_.PropagationFlags -band 2) -ne 0) }
@@ -256,7 +261,12 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     $full = @($rules | Where-Object { $_.sid -eq $sid.Value -and $_.allow -and !$_.inherit_only -and (($_.rights -band ${FULL_CONTROL}) -eq ${FULL_CONTROL}) }).Count -gt 0
     $value = @{ current_sid = $sid.Value; owner_sid = $owner; reparse = $false; current_user_full_control = $full; rules = $rules }
     $response = @{ id = $request.id; ok = $true; value = $value }
-  } catch { $response = @{ id = $request.id; ok = $false } }
+  } catch {
+    $exception = $_.Exception.GetBaseException()
+    $response = @{ id = $request.id; ok = $false; error = @{
+      stage = $stage; kind = $exception.GetType().Name; code = [int]$exception.HResult
+    } }
+  }
   finally { if ($null -ne $pins) { foreach ($pin in $pins) { $pin.Dispose() } } }
   [Console]::WriteLine(($response | ConvertTo-Json -Depth 5 -Compress))
 }
@@ -352,7 +362,24 @@ function createAclWorker(): AclWorker {
         pending.delete(response.id);
         clearTimeout(request.timer);
         if (response.ok) request.resolve(response.value);
-        else request.reject(new Error("private_storage_acl_unavailable"));
+        else {
+          const diagnostic = response.error;
+          const cause =
+            diagnostic &&
+            ["request", "pin", "read", "protect", "verify"].includes(
+              diagnostic.stage,
+            ) &&
+            typeof diagnostic.kind === "string" &&
+            /^[A-Za-z]+$/.test(diagnostic.kind) &&
+            Number.isSafeInteger(diagnostic.code)
+              ? new Error(
+                  `windows_acl_${diagnostic.stage}:${diagnostic.kind}:${diagnostic.code}`,
+                )
+              : undefined;
+          request.reject(
+            new Error("private_storage_acl_unavailable", { cause }),
+          );
+        }
       } catch {
         return finish();
       }

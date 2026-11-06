@@ -73,7 +73,8 @@ it.runIf(process.platform === "win32")(
       {},
     );
     const input = JSON.stringify({ text: "\u4f60\u597d Windows" });
-    const result = spawnSync("cmd.exe", ["/d", "/s", "/c", echo], {
+    const result = spawnSync(echo, {
+      shell: true,
       input,
       encoding: "utf8",
       windowsHide: true,
@@ -91,7 +92,8 @@ it.runIf(process.platform === "win32")(
       "context",
       {},
     );
-    const failure = spawnSync("cmd.exe", ["/d", "/s", "/c", failed], {
+    const failure = spawnSync(failed, {
+      shell: true,
       input: "{}",
       encoding: "utf8",
       windowsHide: true,
