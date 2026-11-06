@@ -19,6 +19,7 @@ import logging
 import os
 import sqlite3
 import stat
+import sys
 import threading
 import time
 import weakref
@@ -36,6 +37,7 @@ from one_memory.database import (
     take_the_write_lock_first,
 )
 from one_memory.service_levels import current_service_level
+from one_memory.windows_security import assert_private_path, protect_private_path
 
 # Reads are short and WAL lets them run beside the writer, so a handful covers
 # the interface's polling alongside the background work; a caller beyond it
@@ -482,6 +484,7 @@ class MainDatabase:
         if directory.is_symlink() or not directory.is_dir():
             raise NotADirectoryError(f"backups directory is not a plain directory: {directory}")
         directory.chmod(0o700)
+        protect_private_path(directory, directory=True)
         _create_owner_only(target)
         partial = directory / f".{target.name}.partial"
         published = False
@@ -494,21 +497,16 @@ class MainDatabase:
                 # replaced `target` would look like safety while being none.
                 if copy.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                     raise sqlite3.DatabaseError("backup failed SQLite quick_check")
-            # fsync the file (and the directory below) so a crash right after
-            # this returns cannot leave the published name pointing at data the
-            # filesystem has not written out.
-            descriptor = os.open(partial, os.O_RDONLY)
+            # Windows FlushFileBuffers requires a writable handle. POSIX also
+            # syncs the containing directory after publishing the flushed copy.
+            descriptor = os.open(partial, os.O_RDWR if sys.platform == "win32" else os.O_RDONLY)
             try:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
             os.replace(partial, target)
             published = True
-            directory_descriptor = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
+            _sync_directory(directory)
         except BaseException:
             # Before `os.replace`, `target` is only this call's reservation.
             # After it, `target` is the verified rollback copy: a directory
@@ -557,6 +555,7 @@ class MainDatabase:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if directory.is_symlink() or not directory.is_dir():
             raise NotADirectoryError(f"database directory is not a plain directory: {directory}")
+        protect_private_path(directory, directory=True)
         partial = directory / f".{self.path.name}.restore-{uuid4().hex}.partial"
 
         with self._state:
@@ -596,7 +595,7 @@ class MainDatabase:
                         if restored.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                             raise sqlite3.DatabaseError("restored copy failed SQLite quick_check")
                 partial.chmod(0o600)
-                descriptor = os.open(partial, os.O_RDONLY)
+                descriptor = os.open(partial, os.O_RDWR if sys.platform == "win32" else os.O_RDONLY)
                 try:
                     os.fsync(descriptor)
                 finally:
@@ -607,11 +606,7 @@ class MainDatabase:
                 # deleting it first turned a failed replace into data loss.
                 _remove_stale_sidecar(Path(f"{self.path}-wal"))
                 _remove_stale_sidecar(Path(f"{self.path}-shm"))
-                directory_descriptor = os.open(directory, os.O_RDONLY)
-                try:
-                    os.fsync(directory_descriptor)
-                finally:
-                    os.close(directory_descriptor)
+                _sync_directory(directory)
             finally:
                 partial.unlink(missing_ok=True)
                 self._identity = None
@@ -1009,6 +1004,18 @@ def _create_owner_only(path: Path) -> None:
     # not there to add on Windows.
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     os.close(os.open(path, flags, 0o600))
+    protect_private_path(path, directory=False)
+
+
+def _sync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        assert_private_path(path, directory=True)
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _tighten_owner(path: Path) -> None:

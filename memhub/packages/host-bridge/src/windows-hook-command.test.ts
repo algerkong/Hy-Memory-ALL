@@ -23,6 +23,7 @@ it("renders native Windows capture without a POSIX shell or inline environment s
     "$env:ONE_MEMORY_DATA_DIR = 'C:\\Users\\Example\\memory \u6d4b\u8bd5'",
   );
   expect(script(command)).toContain("'capture' 'codex'");
+  expect(script(command)).toContain("$ProgressPreference = 'SilentlyContinue'");
   expect(script(command)).toContain("exit 0");
 });
 

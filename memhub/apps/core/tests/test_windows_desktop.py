@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 from one_memory.config import Settings
+from one_memory.database_access import main_database
 from one_memory.file_imports import FileImportStore
 from one_memory.imports import access
 from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError
@@ -183,6 +184,30 @@ def test_native_file_import_keeps_operation_receipts_across_confirmation(tmp_pat
     assert receipt.upload_id is not None
     assert store.commit(receipt.upload_id).committed
     assert store.lookup_operation(operation).upload_state == "committed"
+
+
+@windows
+def test_native_database_backup_and_restore_flush_private_files(tmp_path):
+    data = tmp_path / "memory \u6d4b\u8bd5"
+    data.mkdir()
+    protect_private_path(data, directory=True)
+    database = main_database(data / "one-memory.sqlite3")
+    backup = data / "backups" / "windows.sqlite3"
+    try:
+        with database.write() as connection:
+            connection.execute("CREATE TABLE evidence (body TEXT)")
+            connection.execute("INSERT INTO evidence VALUES ('approved')")
+            connection.commit()
+        database.back_up(backup)
+        assert_private_path(backup, directory=False)
+        with database.write() as connection:
+            connection.execute("DELETE FROM evidence")
+            connection.commit()
+        database.restore_from(backup, required_tables=frozenset({"evidence"}))
+        with database.read() as connection:
+            assert connection.execute("SELECT body FROM evidence").fetchall() == [("approved",)]
+    finally:
+        database.close()
 
 
 @windows

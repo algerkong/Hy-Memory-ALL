@@ -475,7 +475,7 @@ class FileImportStore:
                 file.chmod(0o600)
                 protect_private_path(file, directory=False)
                 if durable:
-                    with file.open("rb") as staged:
+                    with file.open("r+b" if sys.platform == "win32" else "rb") as staged:
                         os.fsync(staged.fileno())
             if durable:
                 _sync_directory(directory)

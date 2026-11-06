@@ -90,6 +90,7 @@ try {
             "tests/test_parent_watchdog.py",
             "tests/test_cursor_default_root_windows.py",
             "tests/test_memory_server_config_state.py",
+          "tests/test_backup_endpoint.py",
             `--junitxml=${path.join(root, "build/windows-tests/core-junit.xml")}`,
           ],
           { cwd: root },

@@ -176,6 +176,7 @@ async function windowsAcl(
 // many files; starting PowerShell for each one would exhaust its HTTP deadline.
 const ACL_WORKER_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::InputEncoding = [Console]::OutputEncoding
 Add-Type -TypeDefinition @'
@@ -230,9 +231,11 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     $directory = [bool]$request.directory
     $stage = 'pin'
     $pins = [MemHubPrivatePaths]::Pin($target, $directory)
-    $stage = 'read'
+    $stage = 'identity'
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $stage = 'read'
     $acl = Get-Acl -LiteralPath $target
+    $stage = 'owner'
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @($sid.Value, '${SYSTEM_SID}', '${ADMINISTRATORS_SID}')) { throw 'owner' }
     if ($request.protect) {
@@ -265,6 +268,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     $exception = $_.Exception.GetBaseException()
     $response = @{ id = $request.id; ok = $false; error = @{
       stage = $stage; kind = $exception.GetType().Name; code = [int]$exception.HResult
+      line = [int]$_.InvocationInfo.ScriptLineNumber
     } }
   }
   finally { if ($null -ne $pins) { foreach ($pin in $pins) { $pin.Dispose() } } }
@@ -366,14 +370,21 @@ function createAclWorker(): AclWorker {
           const diagnostic = response.error;
           const cause =
             diagnostic &&
-            ["request", "pin", "read", "protect", "verify"].includes(
-              diagnostic.stage,
-            ) &&
+            [
+              "request",
+              "pin",
+              "identity",
+              "read",
+              "owner",
+              "protect",
+              "verify",
+            ].includes(diagnostic.stage) &&
             typeof diagnostic.kind === "string" &&
             /^[A-Za-z]+$/.test(diagnostic.kind) &&
-            Number.isSafeInteger(diagnostic.code)
+            Number.isSafeInteger(diagnostic.code) &&
+            Number.isSafeInteger(diagnostic.line)
               ? new Error(
-                  `windows_acl_${diagnostic.stage}:${diagnostic.kind}:${diagnostic.code}`,
+                  `windows_acl_${diagnostic.stage}:${diagnostic.kind}:${diagnostic.code}:line${diagnostic.line}`,
                 )
               : undefined;
           request.reject(

@@ -812,7 +812,7 @@ def _backup_sqlite(
         sqlite_check()
         if target.stat().st_size != size:
             raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
-        with target.open("rb") as copied:
+        with target.open("r+b" if sys.platform == "win32" else "rb") as copied:
             digest = _hash_stream(copied, sqlite_check, path=target, size=size)
             sqlite_check()
             os.fsync(copied.fileno())

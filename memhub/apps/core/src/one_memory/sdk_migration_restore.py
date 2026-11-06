@@ -103,7 +103,7 @@ def _write_json(path: Path, document: dict[str, object]) -> None:
 
 
 def _fsync(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    descriptor = os.open(path, os.O_RDWR if sys.platform == "win32" else os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
@@ -111,7 +111,7 @@ def _fsync(path: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    # Windows cannot open a directory; its renames are durable on return.
+    # Windows lacks directory fsync; product-owned files are flushed before replacement.
     try:
         _fsync(path)
     except OSError:

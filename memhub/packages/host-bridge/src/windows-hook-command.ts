@@ -28,6 +28,7 @@ export function windowsHookCommand(
         : `$output = @(${invocation} 2>$null)`;
   const script = `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::InputEncoding = $OutputEncoding
 [Console]::OutputEncoding = $OutputEncoding
