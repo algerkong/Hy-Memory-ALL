@@ -243,8 +243,10 @@ class SourceSnapshotStore:
                 tempfile.mkdtemp(prefix=f".{snapshot_id}.", suffix=".pending", dir=self.directory)
             )
             staging_inode = _inode(staging)
+            protect_private_path(staging, directory=True)
             root = staging / "files"
             root.mkdir(mode=0o700)
+            protect_private_path(root, directory=True)
             root_inode = _inode(root)
 
             def capture_check() -> None:
@@ -1172,6 +1174,7 @@ def _make_parents(root: Path, relative: Path, check: Callable[[], None]) -> None
         parent /= part
         parent.mkdir(mode=0o700, exist_ok=True)
         _reject_symlinks(parent)
+        protect_private_path(parent, directory=True)
         _require_directory(parent, mode=0o700)
 
 
@@ -1288,7 +1291,10 @@ def _remove_staging(path: Path, identity: tuple[int, int]) -> None:
             raise SnapshotError(SnapshotErrorCode.CLEANUP_FAILED)
         if sys.platform == "win32":
             for directory, _, files in os.walk(path, followlinks=False):
-                _reject_symlinks(Path(directory))
+                current_directory = Path(directory)
+                _reject_symlinks(current_directory)
+                assert_private_path(current_directory, directory=True)
+                current_directory.chmod(0o700)
                 for filename in files:
                     item = Path(directory) / filename
                     _reject_symlinks(item)

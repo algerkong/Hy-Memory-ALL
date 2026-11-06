@@ -162,7 +162,7 @@ const fixtures: Array<{
   forbidden: ReturnType<typeof vi.fn>;
   window: EventEmitter & { webContents: EventEmitter };
 }> = [];
-function fixture(platform: NodeJS.Platform = "darwin") {
+function fixture(platform: NodeJS.Platform = process.platform) {
   const handlers = new Map<
     string,
     (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>

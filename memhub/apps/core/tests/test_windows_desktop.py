@@ -26,6 +26,7 @@ from one_memory.windows_security import (
     assert_private_path,
     protect_private_path,
 )
+from tests.test_chat_exports import chatgpt_export
 
 pytestmark = pytest.mark.contract
 windows = pytest.mark.skipif(sys.platform != "win32", reason="native Windows required")
@@ -178,7 +179,7 @@ def test_native_sqlite_snapshot_does_not_write_the_host_wal_or_shm(tmp_path):
 def test_native_file_import_keeps_operation_receipts_across_confirmation(tmp_path):
     store = FileImportStore(tmp_path / "imports")
     operation = str(uuid4())
-    payload = b'{"messages":[{"role":"user","content":"approved"}]}'
+    payload = json.dumps(chatgpt_export()).encode()
     receipt = store.prepare(payload, "chat.json", operation_id=operation)
     assert receipt.state == "completed"
     assert receipt.upload_id is not None

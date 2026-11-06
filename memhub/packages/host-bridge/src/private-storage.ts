@@ -234,7 +234,8 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     $stage = 'identity'
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $stage = 'read'
-    $acl = Get-Acl -LiteralPath $target
+    if ($directory) { $acl = [System.IO.Directory]::GetAccessControl($target) }
+    else { $acl = [System.IO.File]::GetAccessControl($target) }
     $stage = 'owner'
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @($sid.Value, '${SYSTEM_SID}', '${ADMINISTRATORS_SID}')) { throw 'owner' }
@@ -252,8 +253,13 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($principal, 'FullControl', $inheritance, 'None', 'Allow')
         $acl.AddAccessRule($rule)
       }
-      Set-Acl -LiteralPath $target -AclObject $acl
-      $acl = Get-Acl -LiteralPath $target
+      if ($directory) {
+        [System.IO.Directory]::SetAccessControl($target, $acl)
+        $acl = [System.IO.Directory]::GetAccessControl($target)
+      } else {
+        [System.IO.File]::SetAccessControl($target, $acl)
+        $acl = [System.IO.File]::GetAccessControl($target)
+      }
       $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     }
     $stage = 'verify'
