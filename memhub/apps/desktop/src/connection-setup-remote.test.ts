@@ -329,17 +329,19 @@ it("validates payloads and explicit confirmation before remote calls", async () 
   for (const fn of Object.values(f.remote)) expect(fn).not.toHaveBeenCalled();
 });
 
-it("keeps unsupported-platform guards without local I/O", async () => {
+it("supports Windows remote setup without local I/O or reduced authorization", async () => {
   const f = fixture("win32");
   expect(await f.call("capability")).toEqual({
-    available: false,
-    reason: "unsupported_platform",
+    available: true,
+    reason: null,
   });
-  await expect(f.call("preview", selection)).rejects.toThrow(
-    "unsupported_platform",
-  );
-  expect(f.remote.capability).not.toHaveBeenCalled();
-  expect(f.remote.preview).not.toHaveBeenCalled();
+  expect(await f.call("preview", selection)).toEqual(preview);
+  await expect(
+    f.call("execute", { ...execution, userConfirmed: false }),
+  ).rejects.toThrow("invalid_input");
+  expect(f.remote.capability).toHaveBeenCalledOnce();
+  expect(f.remote.preview).toHaveBeenCalledOnce();
+  expect(f.remote.execute).not.toHaveBeenCalled();
 });
 
 it("binds plans to one trusted window but allows GET-only receipt recovery in another", async () => {

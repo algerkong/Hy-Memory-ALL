@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 layout = os.environ.get('ONE_MEMORY_CORE_LAYOUT', 'folder')
 if layout not in {'single-file', 'folder'}:
@@ -12,6 +13,11 @@ datas = [('src/one_memory/embedding_assets', 'one_memory/embedding_assets')]
 binaries = []
 # Loaded lazily by the API; static dependency analysis cannot discover it.
 hiddenimports = []
+if sys.platform == 'win32':
+    # keyring discovers the Credential Manager backend via distribution metadata.
+    datas += copy_metadata('keyring')
+    hiddenimports += collect_submodules('keyring.backends.Windows')
+    hiddenimports += collect_submodules('win32ctypes')
 tmp_ret = collect_all('hy_memory')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('chromadb')
@@ -49,7 +55,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=sys.platform != 'win32',
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
@@ -66,7 +72,7 @@ if folder_layout:
         a.binaries,
         a.datas,
         strip=False,
-        upx=True,
+        upx=sys.platform != 'win32',
         upx_exclude=[],
         name='one-memory-runtime',
     )

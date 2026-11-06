@@ -29,6 +29,7 @@
 
 import { createHash } from "node:crypto";
 import { failOpenHookCommand, quoteCaptureCommand } from "./capture-hooks.js";
+import { windowsHookCommand } from "./windows-hook-command.js";
 
 const MARKETPLACE_MANIFEST = ".codebuddy-plugin/marketplace.json";
 const PLUGIN_MANIFEST = ".codebuddy-plugin/plugin.json";
@@ -276,7 +277,29 @@ function captureHook(
  * The entry writes straight to the hook's stdout. It prints one complete
  * reply or nothing, so there is nothing to hold back and reprint.
  */
-export function injectionHookCommand(runtime: InjectionHookRuntime): string {
+export function injectionHookCommand(
+  runtime: InjectionHookRuntime,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    return windowsHookCommand(
+      runtime.runtimeCommand,
+      [runtime.recallCliPath, "--inject", "workbuddy"],
+      "context",
+      {
+        ELECTRON_RUN_AS_NODE: "1",
+        ONE_MEMORY_BROKER_DISCOVERY: runtime.discoveryPath,
+        ...(runtime.credentialFile
+          ? { ONE_MEMORY_HOST_CREDENTIAL_FILE: runtime.credentialFile }
+          : {}),
+        ...(runtime.dataDir ? { ONE_MEMORY_DATA_DIR: runtime.dataDir } : {}),
+        ...(runtime.captureCommand
+          ? { ONE_MEMORY_CAPTURE_COMMAND: runtime.captureCommand }
+          : {}),
+      },
+      true,
+    );
+  }
   const environment = [
     'ELECTRON_RUN_AS_NODE="1"',
     `ONE_MEMORY_BROKER_DISCOVERY=${quoteCaptureCommand(runtime.discoveryPath)}`,

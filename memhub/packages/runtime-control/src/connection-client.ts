@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { HostPairingReceipt } from "@one-memory/host-bridge";
-import { isConnectionControlError } from "@one-memory/host-bridge";
+import {
+  assertPrivatePath,
+  isConnectionControlError,
+} from "@one-memory/host-bridge";
 import axios from "axios";
 import { inspectRecallBrokerStatus } from "./broker-status.js";
 import type { BatchJournal, BatchResult } from "./connection-batch.js";
@@ -70,17 +73,10 @@ export function createConnectionClient(options: {
 
   async function root(): Promise<Root> {
     try {
-      if (process.platform === "win32" || !process.getuid)
-        fail("storage_unavailable");
       const resolved = await realpath(dataDir);
       const original = await lstat(dataDir),
-        info = await lstat(resolved);
-      if (
-        original.isSymbolicLink() ||
-        !info.isDirectory() ||
-        (info.mode & 0o777) !== 0o700 ||
-        info.uid !== process.getuid()
-      )
+        info = await assertPrivatePath(resolved, "directory");
+      if (original.isSymbolicLink() || !info.isDirectory())
         fail("storage_unavailable");
       const current = {
         path: resolved,

@@ -1,0 +1,100 @@
+name: Windows desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-desktop.yml"
+      - "memhub/**"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-desktop.yml"
+      - "memhub/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: memhub
+    shell: pwsh
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: memhub/apps/core/uv.lock
+      - name: Install locked dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --directory apps/core --all-groups --locked
+          exit $LASTEXITCODE
+      - name: Typecheck desktop and shared runtime
+        run: pnpm --filter @one-memory/host-bridge --filter @one-memory/runtime-control --filter @one-memory/desktop -r typecheck
+      - name: Verify Core test inventory
+        run: uv run --directory apps/core python ../../scripts/generate_core_test_index.py --check
+      - name: Native Windows permission and lifecycle tests
+        env:
+          ONE_MEMORY_TEST_TEMP_ROOT: ${{ runner.temp }}
+        run: pnpm test:windows
+      - name: Build self-contained Windows desktop
+        run: pnpm package:win:dir
+      - name: Verify packaged window, restart and graceful shutdown
+        env:
+          ONE_MEMORY_TEST_TEMP_ROOT: ${{ runner.temp }}
+        run: >-
+          pnpm test:windows:packaged
+          --app build/windows-desktop/win-unpacked/MemHub.exe
+          --output build/windows-desktop/evidence/unpacked
+      - name: Package the verified app as a per-user NSIS installer
+        run: pnpm package:win --prepackaged
+      - name: Verify real installer and uninstall data preservation
+        env:
+          ONE_MEMORY_TEST_TEMP_ROOT: ${{ runner.temp }}
+        run: |
+          $receipt = Get-Content build/windows-desktop/windows-build-receipt.json -Raw | ConvertFrom-Json
+          pnpm test:windows:packaged --installer "build/windows-desktop/$($receipt.installer.filename)" --output build/windows-desktop/evidence/installed
+          exit $LASTEXITCODE
+      - name: Upload installer, checksums and verification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memhub-windows-x64
+          path: |
+            memhub/build/windows-desktop/MemHub-v*-windows-x64-setup.exe
+            memhub/build/windows-desktop/checksums.txt
+            memhub/build/windows-desktop/windows-build-receipt.json
+            memhub/build/windows-desktop/evidence/**
+            memhub/build/windows-tests/core-junit.xml
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memhub-windows-x64-failure
+          path: |
+            memhub/build/windows-desktop/evidence/**
+            memhub/build/windows-desktop/windows-build-receipt.json
+            memhub/build/windows-tests/**
+            ${{ runner.temp }}/memhub-windows-smoke.*/Memory*/home/.one-memory/logs/**
+          if-no-files-found: ignore
+          retention-days: 7

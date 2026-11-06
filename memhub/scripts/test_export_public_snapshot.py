@@ -28,6 +28,7 @@ def test_public_export_has_only_reviewed_root_files(tmp_path: Path) -> None:
     for required in (
         "docs/INSTALLATION.md",
         "docs/LOCALIZATION.md",
+        "docs/WINDOWS_DESKTOP.md",
         "docs/harness-support/README.md",
         "docs/harness-support/hermes.md",
         "scripts/build-release-assets.mjs",
@@ -35,6 +36,11 @@ def test_public_export_has_only_reviewed_root_files(tmp_path: Path) -> None:
         "scripts/publish-cli-after-release.mjs",
         "scripts/verify_public_release_ready.py",
         "scripts/verify_public_snapshot.py",
+        "scripts/dev.mjs",
+        "scripts/run-command.mjs",
+        "scripts/run-tests-isolated.mjs",
+        "scripts/platform/windows/build-windows-desktop.mjs",
+        "scripts/platform/windows/smoke-windows-desktop.mjs",
     ):
         assert (target / required).is_file(), required
 

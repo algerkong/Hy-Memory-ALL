@@ -14,6 +14,7 @@ import type {
   SourceResponse,
   SourceSyncState,
 } from "@one-memory/contracts";
+import { assertPrivatePath } from "@one-memory/host-bridge";
 import {
   type ConnectionClient,
   type DiagnosticSink,
@@ -100,13 +101,8 @@ export function installConnectionSetupIpc(options: Options) {
   async function verifiedRoot() {
     const resolved = await realpath(options.dataDir);
     const original = await lstat(options.dataDir),
-      stat = await lstat(resolved);
-    if (
-      original.isSymbolicLink() ||
-      !stat.isDirectory() ||
-      (stat.mode & 0o777) !== 0o700 ||
-      stat.uid !== process.getuid?.()
-    )
+      stat = await assertPrivatePath(resolved, "directory");
+    if (original.isSymbolicLink() || !stat.isDirectory())
       fail("storage_unavailable");
     const value = {
       path: resolved,
@@ -242,7 +238,7 @@ export function installConnectionSetupIpc(options: Options) {
     if (options.disabledReason)
       return { available: false, reason: options.disabledReason };
     if (
-      (options.platform ?? process.platform) === "win32" ||
+      (options.platform ?? process.platform) !== "win32" &&
       typeof process.getuid !== "function"
     )
       return { available: false, reason: "unsupported_platform" };
@@ -293,11 +289,6 @@ export function installConnectionSetupIpc(options: Options) {
         }
         if (channel !== "capability" && args.length !== 1)
           fail("invalid_input");
-        if (
-          channel !== "capability" &&
-          (options.platform ?? process.platform) === "win32"
-        )
-          fail("unsupported_platform");
         // Validate before lazy I/O; values are copied before the first await.
         let selection: ConnectionSetupSelection | undefined,
           execution: ConnectionSetupExecute | undefined,

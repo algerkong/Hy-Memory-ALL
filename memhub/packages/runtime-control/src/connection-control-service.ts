@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { SourceResponse, SourceSyncState } from "@one-memory/contracts";
-import type { ConnectionControlRequest } from "@one-memory/host-bridge";
+import {
+  assertPrivatePath,
+  type ConnectionControlRequest,
+} from "@one-memory/host-bridge";
 import type { RecallHostLayout } from "@one-memory/host-bridge/installer";
 import axios from "axios";
 import type {
@@ -46,17 +49,13 @@ export function createConnectionControlService(options: Options) {
     maxBodyLength: 16384,
   });
   async function verify() {
-    if (stopped || process.platform === "win32" || !process.getuid) fail();
+    if (stopped) fail();
     const resolved = await realpath(options.dataDir);
     const original = await lstat(options.dataDir);
-    const info = await lstat(resolved);
-    if (
-      original.isSymbolicLink() ||
-      !info.isDirectory() ||
-      (info.mode & 0o777) !== 0o700 ||
-      info.uid !== process.getuid()
-    )
-      fail();
+    const info = await assertPrivatePath(resolved, "directory").catch(() =>
+      fail(),
+    );
+    if (original.isSymbolicLink() || !info.isDirectory()) fail();
     const identity = JSON.stringify([
       "connection-data-v1",
       resolved,

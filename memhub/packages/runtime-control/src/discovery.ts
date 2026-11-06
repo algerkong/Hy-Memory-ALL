@@ -1,7 +1,8 @@
 /** Shared, fail-closed discovery for a standalone One Memory Runtime. */
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { HealthResponse } from "@one-memory/contracts";
+import { assertPrivatePath, assertPrivateStat } from "@one-memory/host-bridge";
 
 export type RuntimeIdentity = HealthResponse;
 
@@ -282,9 +283,33 @@ async function readRuntimeToken(
   options: RuntimeAttachmentOptions,
 ): Promise<string | null> {
   const platform = options.platform ?? process.platform;
-  if (platform === "win32") return null;
   const target = path.join(options.dataDir, "runtime-token");
   try {
+    if (platform === "win32") {
+      // An injected platform is not real Windows ACL evidence.
+      if (process.platform !== "win32") return null;
+      await assertPrivatePath(options.dataDir, "directory");
+      const expected = await assertPrivatePath(target, "file");
+      const handle = await open(target, "r");
+      try {
+        const info = await handle.stat();
+        assertPrivateStat(info, "file");
+        if (
+          info.dev !== expected.dev ||
+          info.ino !== expected.ino ||
+          info.size < 1 ||
+          info.size > 4096
+        )
+          return null;
+        const buffer = Buffer.alloc(4097);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        return bytesRead > 0 && bytesRead <= 4096
+          ? buffer.subarray(0, bytesRead).toString("utf8")
+          : null;
+      } finally {
+        await handle.close();
+      }
+    }
     const metadata = await lstat(target);
     if (!metadata.isFile() || metadata.isSymbolicLink()) return null;
     if ((metadata.mode & 0o077) !== 0) return null;

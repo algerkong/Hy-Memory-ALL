@@ -500,7 +500,8 @@ class DiagnosticLog:
                 written += sent
             # Permissions on the descriptor we just wrote, not on a path that
             # could have been swapped underneath us since.
-            os.fchmod(descriptor, 0o600)
+            if os.name == "posix":
+                os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
             self._size = (self._size or 0) + written

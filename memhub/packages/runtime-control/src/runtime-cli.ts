@@ -47,6 +47,7 @@ import {
   runtimeInstallLayout,
 } from "./service-plan.js";
 import { createSourceChangeHandler } from "./source-change-handler.js";
+import { waitForWindowsProcessStop } from "./windows-process-stop.js";
 
 declare const __ONE_MEMORY_VERSION__: string;
 declare const __ONE_MEMORY_BUILD_NUMBER__: string;
@@ -1017,9 +1018,23 @@ export async function runRuntimeCli(
   const service = await createRuntimeService(config);
   await service.start();
   const appRemoval = new AbortController();
+  const windowsStop = new AbortController();
   try {
     await Promise.race([
       stopRequested,
+      ...(process.platform === "win32" && service.instanceId
+        ? [
+            waitForWindowsProcessStop(
+              {
+                dataDir: config.dataDir,
+                kind: "runtime",
+                pid: process.pid,
+                instanceId: service.instanceId,
+              },
+              windowsStop.signal,
+            ),
+          ]
+        : []),
       waitForAppRemoval(
         {
           dataDir: config.dataDir,
@@ -1030,6 +1045,7 @@ export async function runRuntimeCli(
     ]);
   } finally {
     appRemoval.abort();
+    windowsStop.abort();
     await service.stop();
     await ownLogs?.flush();
   }

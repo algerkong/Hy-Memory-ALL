@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { protectWindowsPrivatePath } from "@one-memory/host-bridge";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,6 +20,7 @@ function fakeChild(): ChildProcess {
 
 async function writeService(dataDir: string) {
   await mkdir(dataDir, { recursive: true });
+  await protectWindowsPrivatePath(dataDir, "directory");
   await writeFile(
     path.join(dataDir, "runtime.json"),
     JSON.stringify({

@@ -12,5 +12,8 @@ allowBuilds:
 
 disallowWorkspaceCycles: true
 
+minimumReleaseAgeExclude:
+  - playwright-core@1.65.0
+
 overrides:
   "@electron/get": 5.1.0

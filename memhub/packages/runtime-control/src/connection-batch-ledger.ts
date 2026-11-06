@@ -3,6 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import {
+  assertPrivatePath,
+  assertPrivateStat,
+  syncPrivateDirectory,
+} from "@one-memory/host-bridge";
 import type {
   BatchJournal,
   BatchLedger,
@@ -54,8 +59,7 @@ export class PersistentBatchLedger implements BatchLedger {
     const root = await checkedRoot(dataDir);
     const directory = path.join(dataDir, "connection-batches");
     await fs.mkdir(directory, { mode: 0o700 });
-    const info = await fs.lstat(directory);
-    privateDirectory(info);
+    const info = await assertPrivatePath(directory, "directory");
     const binding: Binding = {
       schemaVersion: 1,
       ...checked,
@@ -78,8 +82,7 @@ export class PersistentBatchLedger implements BatchLedger {
     const checked = checkedOwner(owner);
     const root = await checkedRoot(dataDir);
     const directory = path.join(dataDir, "connection-batches");
-    const info = await fs.lstat(directory);
-    privateDirectory(info);
+    const info = await assertPrivatePath(directory, "directory");
     const value = record(
       await readJson(path.join(directory, "owner.json"), 2048),
     );
@@ -122,8 +125,7 @@ export class PersistentBatchLedger implements BatchLedger {
       if (hasCode(error, "EEXIST")) fail("recovery_required");
       throw error;
     }
-    const identity = await fs.lstat(lock);
-    privateDirectory(identity);
+    const identity = await assertPrivatePath(lock, "directory");
     const lease: Lease = {
       active: true,
       poisoned: false,
@@ -251,8 +253,7 @@ export class PersistentBatchLedger implements BatchLedger {
       temporaryIdentity = await writeNew(temporary, JSON.stringify(next));
       await this.checkLease(lease);
       if (original) {
-        const latest = await fs.lstat(target);
-        privateFile(latest);
+        const latest = await assertPrivatePath(target, "file");
         if (!same(original, latest)) fail("revision_conflict");
         await fs.rename(temporary, target);
       } else {
@@ -264,7 +265,7 @@ export class PersistentBatchLedger implements BatchLedger {
       published = true;
       await syncDirectory(this.directory);
       await this.checkLease(lease);
-      privateFile(await fs.lstat(target));
+      await assertPrivatePath(target, "file");
     } catch (error) {
       // After publication, an fsync error is unknown durability, never rollback success.
       if (published) lease.poisoned = true;
@@ -309,8 +310,7 @@ export class PersistentBatchLedger implements BatchLedger {
   }
   private async checkDirectories() {
     const root = await checkedRoot(this.dataDir);
-    const directory = await fs.lstat(this.directory);
-    privateDirectory(directory);
+    const directory = await assertPrivatePath(this.directory, "directory");
     if (
       !same(root, this.dataIdentity) ||
       !same(directory, this.directoryIdentity)
@@ -329,8 +329,7 @@ export class PersistentBatchLedger implements BatchLedger {
   private async checkLease(lease: Lease) {
     await this.check();
     const lock = path.join(this.directory, "execution.lock");
-    const info = await fs.lstat(lock);
-    privateDirectory(info);
+    const info = await assertPrivatePath(lock, "directory");
     if (!same(info, lease.identity)) fail("recovery_required");
     const value = await readJson(path.join(lock, "owner.json"), 2048);
     if (
@@ -342,45 +341,35 @@ export class PersistentBatchLedger implements BatchLedger {
 }
 
 async function checkedRoot(dataDir: string): Promise<Stats> {
-  if (process.platform === "win32" || typeof process.getuid !== "function")
+  if (process.platform !== "win32" && typeof process.getuid !== "function")
     fail("platform_unsupported");
   if (
     !path.isAbsolute(dataDir) ||
     path.resolve(dataDir) !== dataDir ||
-    (await fs.realpath(dataDir)) !== dataDir
+    (process.platform === "win32"
+      ? (await fs.realpath(dataDir)).toLowerCase() !== dataDir.toLowerCase()
+      : (await fs.realpath(dataDir)) !== dataDir)
   )
     fail("directory_unsafe");
-  const info = await fs.lstat(dataDir);
-  privateDirectory(info);
-  return info;
-}
-function privateDirectory(info: Stats) {
-  if (
-    !info.isDirectory() ||
-    info.isSymbolicLink() ||
-    info.uid !== process.getuid?.() ||
-    (info.mode & 0o777) !== 0o700
-  )
-    fail("directory_unsafe");
+  return assertPrivatePath(dataDir, "directory");
 }
 function privateFile(info: Stats) {
-  if (
-    !info.isFile() ||
-    info.isSymbolicLink() ||
-    info.nlink !== 1 ||
-    info.uid !== process.getuid?.() ||
-    (info.mode & 0o777) !== 0o600
-  )
+  try {
+    assertPrivateStat(info, "file");
+  } catch {
     fail("file_unsafe");
+  }
 }
 function same(a: Identity, b: Identity) {
   return a.dev === b.dev && a.ino === b.ino;
 }
 async function readJson(file: string, maximum: number): Promise<unknown> {
+  const expected = await assertPrivatePath(file, "file");
   const handle = await fs.open(file, READ);
   try {
     const before = await handle.stat();
     privateFile(before);
+    if (!same(expected, before)) fail("file_changed");
     if (before.size > maximum) fail("size_exceeded");
     const buffer = Buffer.alloc(maximum + 1);
     let length = 0;
@@ -422,22 +411,14 @@ async function writeNew(file: string, text: string): Promise<Identity> {
     await handle.sync();
     const info = await handle.stat();
     privateFile(info);
+    await assertPrivatePath(file, "file");
     return info;
   } finally {
     await handle.close();
   }
 }
 async function syncDirectory(directory: string) {
-  const handle = await fs.open(
-    directory,
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-  );
-  try {
-    privateDirectory(await handle.stat());
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
+  await syncPrivateDirectory(directory);
 }
 function checkedOwner(input: BatchOwner): BatchOwner {
   const value = record(input);

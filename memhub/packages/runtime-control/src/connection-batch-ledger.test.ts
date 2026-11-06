@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   type BatchAdapters,
@@ -12,6 +13,10 @@ import {
   connectionPlanDigest,
 } from "./connection-batch.js";
 import { PersistentBatchLedger } from "./connection-batch-ledger.js";
+
+const { build } = createRequire(import.meta.url)("tsup") as {
+  build(options: Record<string, unknown>): Promise<void>;
+};
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -371,15 +376,24 @@ it("a separate Node process cannot execute while the data-instance lease is held
   const module = fileURLToPath(
     new URL("./connection-batch-ledger.ts", import.meta.url),
   );
+  const compiled = path.join(root, "child-module");
+  await build({
+    entry: [module],
+    format: ["esm"],
+    platform: "node",
+    outDir: compiled,
+    outExtension: () => ({ js: ".mjs" }),
+    noExternal: ["@one-memory/contracts", "@one-memory/host-bridge", "axios"],
+    silent: true,
+  });
   await ledger.exclusive(owner, async () => {
     const child = spawn(
       process.execPath,
       [
-        "--experimental-transform-types",
         "--input-type=module",
         "-e",
         `
-      import {PersistentBatchLedger} from ${JSON.stringify(module)};
+      import {PersistentBatchLedger} from ${JSON.stringify(pathToFileURL(path.join(compiled, "connection-batch-ledger.mjs")).href)};
       const owner=${JSON.stringify(owner)};
       const ledger=await PersistentBatchLedger.open(${JSON.stringify(root)},owner);
       try { await ledger.exclusive(owner,async()=>{console.log('BAD_EFFECT')}); }

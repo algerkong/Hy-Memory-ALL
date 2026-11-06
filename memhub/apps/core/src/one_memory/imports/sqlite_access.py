@@ -1,10 +1,13 @@
+import hashlib
 import os
 import shutil
 import sqlite3
 import stat
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,8 +15,11 @@ from one_memory.imports.access import (
     AuthorizedSourceFile,
     SourceAccessError,
     SourceAccessErrorCode,
+    _changed_ns,
     _same_file,
 )
+from one_memory.windows_files import is_reparse_point
+from one_memory.windows_security import protect_private_path
 
 
 @contextmanager
@@ -22,6 +28,10 @@ def open_sqlite_readonly(
     *,
     timeout: float = 5.0,
 ) -> Iterator[sqlite3.Connection]:
+    if sys.platform == "win32":
+        with _open_windows_sqlite_readonly(source_file, timeout) as connection:
+            yield connection
+        return
     # Keep a no-follow descriptor open while SQLite uses the same validated path.
     # Percent-encode "%" so SQLite's URI parser cannot turn a literal filename
     # such as "%2e%2e%2fsecret.db" into path traversal.
@@ -85,6 +95,81 @@ def open_sqlite_readonly(
             ):
                 raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
             connection.execute("PRAGMA query_only = ON")
+            yield connection
+        finally:
+            connection.close()
+
+
+@contextmanager
+def _open_windows_sqlite_readonly(
+    source_file: AuthorizedSourceFile, timeout: float
+) -> Iterator[sqlite3.Connection]:
+    wal = source_file.path.with_name(source_file.path.name + "-wal")
+    journal = source_file.path.with_name(source_file.path.name + "-journal")
+    if os.path.lexists(journal):
+        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+    sources = [source_file]
+    if os.path.lexists(wal):
+        info = wal.lstat()
+        if not stat.S_ISREG(info.st_mode) or is_reparse_point(info):
+            raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
+        if info.st_size > source_file.max_bytes:
+            raise SourceAccessError(SourceAccessErrorCode.FILE_TOO_LARGE)
+        sources.append(
+            replace(
+                source_file,
+                path=wal,
+                relative_path=source_file.relative_path.with_name(wal.name),
+                file_identity=f"{info.st_dev}:{info.st_ino}",
+                size=info.st_size,
+                modified_ns=info.st_mtime_ns,
+                changed_ns=_changed_ns(info),
+            )
+        )
+
+    def hash_extent(item: AuthorizedSourceFile, destination: Path | None = None) -> str:
+        digest = hashlib.sha256()
+        with item.open_binary() as source:
+            sink = destination.open("wb") if destination is not None else None
+            try:
+                remaining = item.size
+                while remaining:
+                    chunk = os.read(source.fileno(), min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+                    digest.update(chunk)
+                    if sink is not None:
+                        sink.write(chunk)
+                    remaining -= len(chunk)
+                current = os.fstat(source.fileno())
+                if current.st_size != item.size or current.st_mtime_ns != item.modified_ns:
+                    raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+            finally:
+                if sink is not None:
+                    sink.close()
+        return digest.hexdigest()
+
+    with tempfile.TemporaryDirectory(prefix="memhub-sqlite-read-") as directory:
+        private = Path(directory)
+        protect_private_path(private, directory=True)
+        mirror = private / "store.db"
+        hashes = [
+            hash_extent(item, mirror if index == 0 else private / "store.db-wal")
+            for index, item in enumerate(sources)
+        ]
+        if (
+            os.path.lexists(journal)
+            or os.path.lexists(wal) != (len(sources) == 2)
+            or any(
+                hash_extent(item) != digest for item, digest in zip(sources, hashes, strict=True)
+            )
+        ):
+            raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+        connection = sqlite3.connect(mirror, timeout=timeout, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("PRAGMA query_only=ON")
             yield connection
         finally:
             connection.close()

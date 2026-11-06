@@ -38,6 +38,7 @@ PUBLIC_DOCS = frozenset(
         "docs/ARCHITECTURE.md",
         "docs/DEVELOPMENT_LOOP.md",
         "docs/INSTALLATION.md",
+        "docs/WINDOWS_DESKTOP.md",
         "docs/LOCALIZATION.md",
         "docs/cli/EXPERIENCE.md",
         "docs/contracts/diagnostic-logging.md",
@@ -62,6 +63,7 @@ PUBLIC_SCRIPTS = frozenset(
         "scripts/build_service_observer.cjs",
         "scripts/build_service_observer.test.cjs",
         "scripts/check.sh",
+        "scripts/dev.mjs",
         "scripts/export_public_snapshot.py",
         "scripts/fetch_embedding_model.py",
         "scripts/generate_core_test_index.py",
@@ -70,6 +72,11 @@ PUBLIC_SCRIPTS = frozenset(
         "scripts/platform/macos/build-macos-release.mjs",
         "scripts/platform/macos/macos-release-scripts.test.mjs",
         "scripts/platform/macos/notarize-macos-release.mjs",
+        "scripts/platform/windows/build-windows-core.mjs",
+        "scripts/platform/windows/build-windows-desktop.mjs",
+        "scripts/platform/windows/smoke-windows-desktop.mjs",
+        "scripts/platform/windows/test-windows-desktop.mjs",
+        "scripts/platform/windows/windows-desktop-build.test.mjs",
         "scripts/packaged_resource_manifest.cjs",
         "scripts/packaged_resource_manifest.test.cjs",
         "scripts/probe_hy_dependency_surface.py",
@@ -80,6 +87,9 @@ PUBLIC_SCRIPTS = frozenset(
         "scripts/release-version.cjs",
         "scripts/release-workflow.test.mjs",
         "scripts/run-desktop-package-mac-dir.sh",
+        "scripts/run-command.mjs",
+        "scripts/run-command.test.mjs",
+        "scripts/run-tests-isolated.mjs",
         "scripts/run-tests-isolated.sh",
         "scripts/run-tests-isolated.test.mjs",
         "scripts/test_export_public_snapshot.py",
@@ -101,6 +111,7 @@ PUBLIC_SCRIPTS = frozenset(
         "scripts/verify-release-version.test.mjs",
         "scripts/verify_structure.py",
         "scripts/verify_zero_collection.py",
+        "scripts/windows-test-isolation.test.mjs",
     }
 )
 
@@ -114,9 +125,7 @@ PUBLIC_PREFIXES = (
     "scripts/platform/windows/verify-windows-support",
 )
 
-EXCLUDED_PREFIXES = (
-    "apps/cli/docs/",
-)
+EXCLUDED_PREFIXES = ("apps/cli/docs/",)
 
 # These files are useful only with private acceptance receipts, design exports,
 # real-machine paths, or packaging worktrees that the public snapshot excludes.
@@ -190,7 +199,8 @@ def _repository_files(root: Path) -> tuple[str, ...]:
     return tuple(
         path.relative_to(root).as_posix()
         for path in sorted(root.rglob("*"))
-        if (path.is_file() or path.is_symlink()) and ".git" not in path.relative_to(root).parts
+        if (path.is_file() or path.is_symlink())
+        and ".git" not in path.relative_to(root).parts
     )
 
 
@@ -226,7 +236,9 @@ def _scan_text(target: Path) -> list[str]:
         content = path.read_text(encoding="utf-8", errors="replace")
         for marker in FORBIDDEN_TEXT:
             if marker in content:
-                failures.append(f"forbidden public marker {marker!r}: {path.relative_to(target)}")
+                failures.append(
+                    f"forbidden public marker {marker!r}: {path.relative_to(target)}"
+                )
     return failures
 
 
@@ -250,7 +262,9 @@ def export(root: Path, target: Path) -> tuple[str, ...]:
         if path.is_file() and path.name not in ROOT_FILES
     )
     if unexpected_root:
-        raise ValueError(f"unclassified public root files: {', '.join(unexpected_root)}")
+        raise ValueError(
+            f"unclassified public root files: {', '.join(unexpected_root)}"
+        )
     failures = _scan_text(target)
     if failures:
         raise ValueError("\n".join(failures))

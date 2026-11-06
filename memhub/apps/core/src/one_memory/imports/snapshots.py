@@ -33,6 +33,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -53,6 +54,8 @@ from one_memory.imports.access import (
     SourceAccessErrorCode,
     source_root_identity,
 )
+from one_memory.windows_files import is_reparse_point
+from one_memory.windows_security import assert_private_path, protect_private_path
 
 # Every chunk re-runs authority, symlink and budget checks; small chunks made
 # those checks, not I/O, the copy bottleneck (~19 MB/s at 256 KiB).
@@ -336,7 +339,7 @@ class SourceSnapshotStore:
                     capture_check()
                     _write_chunk(sink, encoded[offset : offset + _CHUNK_BYTES])
                 sink.flush()
-                os.fchmod(sink.fileno(), 0o400)
+                _make_readonly(manifest_tmp, sink)
                 os.fsync(sink.fileno())
             capture_check()
             os.replace(manifest_tmp, staging / "manifest.json")
@@ -358,7 +361,7 @@ class SourceSnapshotStore:
             staging = None
             _fsync_directory(self.directory)
             check()
-            attempt.unlink()
+            _unlink_owned_readonly(attempt)
             _fsync_directory(self.directory)
             return self._handle(final / "files", manifest, encoded, grant, check)
         except (SnapshotError, SourceAccessError) as error:
@@ -415,7 +418,7 @@ class SourceSnapshotStore:
             raise SnapshotError(SnapshotErrorCode.INCOMPLETE) from None
         with sink:
             _write_chunk(sink, encoded)
-            os.fchmod(sink.fileno(), 0o400)
+            _make_readonly(path, sink)
             os.fsync(sink.fileno())
         _fsync_directory(self.directory)
         check()
@@ -565,7 +568,7 @@ class SourceSnapshotStore:
                     ):
                         continue
                     details = entry.stat(follow_symlinks=False)
-                    if stat.S_ISLNK(details.st_mode):
+                    if stat.S_ISLNK(details.st_mode) or is_reparse_point(details):
                         raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
                     if stat.S_ISDIR(details.st_mode):
                         stack.append((path, (details.st_dev, details.st_ino)))
@@ -718,7 +721,7 @@ def _backup_sqlite(
                 or details.st_ctime_ns != changed_ns
             ):
                 raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
-        else:
+        elif sys.platform != "win32":
             _reject_writable_shm(source_file.path)
 
     sqlite_check()
@@ -739,11 +742,16 @@ def _backup_sqlite(
             changed_ns = source_file.path.stat().st_ctime_ns
     try:
         sqlite_check()
-        source_context = (
-            _open_closed_wal_snapshot_source(source_file, grant, target, budget, sqlite_check)
-            if closed_wal
-            else _open_sqlite_snapshot_source(source_file, sqlite_check)
-        )
+        if sys.platform == "win32":
+            source_context = _open_windows_sqlite_snapshot_source(
+                source_file, grant, target, budget, sqlite_check
+            )
+        elif closed_wal:
+            source_context = _open_closed_wal_snapshot_source(
+                source_file, grant, target, budget, sqlite_check
+            )
+        else:
+            source_context = _open_sqlite_snapshot_source(source_file, sqlite_check)
         with source_context as source:
             source.execute("BEGIN")
             source.execute("SELECT count(*) FROM sqlite_schema").fetchone()
@@ -873,8 +881,70 @@ def _open_closed_wal_snapshot_source(
         if source_digest() != expected:
             raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
     finally:
-        staged.unlink(missing_ok=True)
+        _unlink_owned_readonly(staged)
         budget.overhead -= source_file.size
+
+
+@contextmanager
+def _open_windows_sqlite_snapshot_source(
+    source_file: AuthorizedSourceFile,
+    grant: AuthorizedSourceRoot,
+    target: Path,
+    budget: _Budget,
+    check: Callable[[], None],
+) -> Iterator[sqlite3.Connection]:
+    # SQLite's Windows VFS cannot promise a readonly host SHM. Recover only
+    # bounded, identity-checked private copies; never open the host in SQLite.
+    sources = [source_file]
+    wal = source_file.path.with_name(source_file.path.name + "-wal")
+    journal = source_file.path.with_name(source_file.path.name + "-journal")
+    if os.path.lexists(journal):
+        raise SnapshotError(SnapshotErrorCode.SQLITE_UNAVAILABLE)
+    if os.path.lexists(wal):
+        sources.append(grant.authorize_file(wal).admit())
+    staged = target.with_name(target.name + ".sqlite-stage")
+    staged_wal = staged.with_name(staged.name + "-wal")
+    # Include the copy, possible SHM, and checkpoint growth in the private budget.
+    overhead = source_file.size + 2 * sum(item.size for item in sources[1:]) + 64 * 1024
+    budget.manifest(overhead)
+    budget.overhead += overhead
+
+    def digest(item: AuthorizedSourceFile) -> str:
+        with item.open_binary() as stream:
+            return _hash_stream(stream, check, path=item.path, size=item.size)
+
+    def stable() -> None:
+        check()
+        if os.path.lexists(journal) or os.path.lexists(wal) != (len(sources) == 2):
+            raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
+        for item, expected in zip(sources, hashes, strict=True):
+            if digest(item) != expected:
+                raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
+
+    try:
+        hashes = [digest(item) for item in sources]
+        for item, destination, expected in zip(sources, (staged, staged_wal), hashes, strict=False):
+            if _copy_extent(item, grant, destination, budget, check) != expected:
+                raise SnapshotError(SnapshotErrorCode.SOURCE_CHANGED)
+        stable()
+        connection = sqlite3.connect(staged, timeout=0.1)
+        try:
+            # Checkpointing this operation's copy can create/modify its SHM only.
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("PRAGMA query_only=ON")
+            yield connection
+        finally:
+            connection.close()
+        stable()
+    finally:
+        for path in (
+            staged,
+            staged_wal,
+            staged.with_name(staged.name + "-shm"),
+            staged.with_name(staged.name + "-journal"),
+        ):
+            path.unlink(missing_ok=True)
+        budget.overhead -= overhead
 
 
 def _reject_writable_shm(database: Path) -> None:
@@ -1046,7 +1116,11 @@ def _validate_tree(
 
 def _reject_symlinks(path: Path) -> None:
     for component in (*reversed(path.parents), path):
-        if component.is_symlink():
+        try:
+            details = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(details.st_mode) or is_reparse_point(details):
             raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
 
 
@@ -1057,6 +1131,12 @@ def _inode(path: Path) -> tuple[int, int]:
 
 def _require_directory(path: Path, *, mode: int) -> None:
     details = path.lstat()
+    if sys.platform == "win32":
+        try:
+            assert_private_path(path, directory=True)
+        except OSError:
+            raise SnapshotError(SnapshotErrorCode.INVALID_DESTINATION) from None
+        return
     if (
         not stat.S_ISDIR(details.st_mode)
         or stat.S_IMODE(details.st_mode) != mode
@@ -1069,11 +1149,20 @@ def _require_readonly(path: Path) -> None:
     details = path.lstat()
     if (
         not stat.S_ISREG(details.st_mode)
-        or stat.S_IMODE(details.st_mode) != 0o400
+        or (
+            bool(details.st_mode & stat.S_IWRITE)
+            if sys.platform == "win32"
+            else stat.S_IMODE(details.st_mode) != 0o400
+        )
         or details.st_nlink != 1
         or (hasattr(os, "getuid") and details.st_uid != os.getuid())
     ):
         raise SnapshotError(SnapshotErrorCode.NOT_READ_ONLY)
+    if sys.platform == "win32":
+        try:
+            assert_private_path(path, directory=False)
+        except OSError:
+            raise SnapshotError(SnapshotErrorCode.NOT_READ_ONLY) from None
 
 
 def _make_parents(root: Path, relative: Path, check: Callable[[], None]) -> None:
@@ -1088,7 +1177,32 @@ def _make_parents(root: Path, relative: Path, check: Callable[[], None]) -> None
 
 def _create_file(path: Path) -> BinaryIO:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    return os.fdopen(os.open(path, flags, 0o600), "wb", buffering=0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        protect_private_path(path, directory=False)
+        if _inode(path) != (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino):
+            raise SnapshotError(SnapshotErrorCode.INVALID_DESTINATION)
+        return os.fdopen(descriptor, "wb", buffering=0)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _make_readonly(path: Path, sink: BinaryIO) -> None:
+    if sys.platform == "win32":
+        if _inode(path) != (os.fstat(sink.fileno()).st_dev, os.fstat(sink.fileno()).st_ino):
+            raise SnapshotError(SnapshotErrorCode.INVALID_DESTINATION)
+        path.chmod(0o400)
+    else:
+        os.fchmod(sink.fileno(), 0o400)
+
+
+def _unlink_owned_readonly(path: Path) -> None:
+    if sys.platform == "win32" and os.path.lexists(path):
+        _reject_symlinks(path)
+        _require_readonly(path)
+        path.chmod(0o600)
+    path.unlink(missing_ok=True)
 
 
 def _write_chunk(sink: BinaryIO, chunk: bytes) -> None:
@@ -1155,6 +1269,9 @@ def _checked_chunks(
 
 
 def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        assert_private_path(path, directory=True)
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
@@ -1169,6 +1286,18 @@ def _remove_staging(path: Path, identity: tuple[int, int]) -> None:
         _reject_symlinks(path)
         if _inode(path) != identity:
             raise SnapshotError(SnapshotErrorCode.CLEANUP_FAILED)
+        if sys.platform == "win32":
+            for directory, _, files in os.walk(path, followlinks=False):
+                _reject_symlinks(Path(directory))
+                for filename in files:
+                    item = Path(directory) / filename
+                    _reject_symlinks(item)
+                    assert_private_path(item, directory=False)
+                    item.chmod(0o600)
+            if _inode(path) != identity:
+                raise SnapshotError(SnapshotErrorCode.CLEANUP_FAILED)
+            shutil.rmtree(path)
+            return
         # Python/Linux does not implement chmod(path, follow_symlinks=False).
         # Walk without following links and chmod the already-open directory
         # descriptors instead: this preserves the no-symlink boundary without

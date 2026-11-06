@@ -186,24 +186,27 @@ describe("desktop background lifecycle with injected Electron", () => {
     expect(f.installTray).toHaveBeenCalledTimes(1);
     expect(f.createWindow).not.toHaveBeenCalled();
   });
-  it("manual launch opens one window and close keeps services alive", async () => {
-    const f = fixture();
-    await f.boot();
-    expect(f.windows).toHaveLength(1);
-    f.windows.length = 0;
-    f.app.emit("window-all-closed");
-    expect(f.stop).not.toHaveBeenCalled();
-    expect(f.app.quit).not.toHaveBeenCalled();
-    f.app.emit("second-instance", {}, ["One Memory"]);
-    await f.flush();
-    expect(f.windows).toHaveLength(1);
-    f.app.emit("activate");
-    await f.flush();
-    expect(f.windows).toHaveLength(1);
-    expect(f.windows[0].restore).toHaveBeenCalled();
-    expect(f.windows[0].show).toHaveBeenCalled();
-    expect(f.windows[0].focus).toHaveBeenCalled();
-  });
+  it.each(["darwin", "win32"] as const)(
+    "manual %s launch keeps services reachable after closing",
+    async (platform) => {
+      const f = fixture(false, true, { platform });
+      await f.boot();
+      expect(f.windows).toHaveLength(1);
+      f.windows.length = 0;
+      f.app.emit("window-all-closed");
+      expect(f.stop).not.toHaveBeenCalled();
+      expect(f.app.quit).not.toHaveBeenCalled();
+      f.app.emit("second-instance", {}, ["One Memory"]);
+      await f.flush();
+      expect(f.windows).toHaveLength(1);
+      f.app.emit("activate");
+      await f.flush();
+      expect(f.windows).toHaveLength(1);
+      expect(f.windows[0].restore).toHaveBeenCalled();
+      expect(f.windows[0].show).toHaveBeenCalled();
+      expect(f.windows[0].focus).toHaveBeenCalled();
+    },
+  );
   it("coalesces early manual launches and activation until services are ready", async () => {
     const f = fixture(true);
     f.app.emit("second-instance", {}, ["One Memory"]);
@@ -428,7 +431,7 @@ describe("desktop lifecycle failure paths", () => {
   });
   it("without a tray a failed window ends the process instead of hiding it", async () => {
     const error = new Error("window_unavailable");
-    const f = fixture(false, true, { platform: "win32", windowError: error });
+    const f = fixture(false, true, { platform: "linux", windowError: error });
     await f.boot();
     expect(f.windows).toHaveLength(0);
     expect(f.onError).toHaveBeenCalledExactlyOnceWith(error);

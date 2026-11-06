@@ -63,11 +63,12 @@ export function startDesktopLifecycle(options: LifecycleOptions): void {
       app.quit();
     }
   };
-  // A window failing is not the services failing. On macOS the tray keeps the
+  // A window failing is not the services failing. The native tray keeps the
   // app reachable, so it stays resident and can be asked again; without one
   // there is no way back to it, and staying would only hide the process.
   const failOpen = (error: unknown) => {
-    if (options.platform === "darwin") report(error);
+    if (options.platform === "darwin" || options.platform === "win32")
+      report(error);
     else fail(error);
   };
   const open = () => {
@@ -104,7 +105,8 @@ export function startDesktopLifecycle(options: LifecycleOptions): void {
     open();
   };
   const allClosed = () => {
-    if (options.platform !== "darwin") app.quit();
+    if (options.platform !== "darwin" && options.platform !== "win32")
+      app.quit();
   };
   const beforeQuit = (event: { preventDefault(): void }) => {
     quitting = true;

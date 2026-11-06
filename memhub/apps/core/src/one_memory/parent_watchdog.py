@@ -19,10 +19,13 @@ drains connections and unwinds the lifespan, and that is what releases the
 lock and removes the receipt. Exiting the thread's stack would leave both.
 """
 
+import json
 import os
 import signal
+import stat
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from one_memory.runtime import process_is_alive
 
@@ -80,6 +83,45 @@ class ParentWatchdog:
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             if self.check_once():
+                return
+
+
+class StopRequestWatchdog:
+    """Windows has no POSIX SIGTERM delivery; observe a private stop request."""
+
+    def __init__(self, data_dir: Path, instance_id: str, *, pid: int | None = None) -> None:
+        self.pid = os.getpid() if pid is None else pid
+        self.instance_id = instance_id
+        self.path = data_dir / f".memhub-core-stop-{self.pid}.json"
+        self._stop = threading.Event()
+
+    def check_once(self) -> bool:
+        try:
+            info = self.path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 2048 or info.st_nlink != 1:
+                return False
+            from one_memory.windows_security import assert_private_path
+
+            assert_private_path(self.path.parent, directory=True)
+            assert_private_path(self.path, directory=False)
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            if value != {"pid": self.pid, "instance_id": self.instance_id}:
+                return False
+            self.path.unlink()
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="memhub-stop-request", daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.1):
+            if self.check_once():
+                _terminate_self()
                 return
 
 

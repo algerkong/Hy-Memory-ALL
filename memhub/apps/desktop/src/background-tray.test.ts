@@ -117,6 +117,26 @@ function fixture(
 }
 
 describe("native macOS background tray", () => {
+  it("supports Windows click/reopen, login state and explicit quit", async () => {
+    const f = fixture(true, "win32");
+    f.setHosting("app-hosted");
+    const dispose = f.install();
+    await flush();
+    expect(f.image.resize).toHaveBeenCalledWith({ width: 32, height: 32 });
+    f.tray.emit("click");
+    f.tray.emit("double-click");
+    expect(f.open).toHaveBeenCalledTimes(2);
+    expect(f.menu()[1]).toMatchObject({
+      type: "checkbox",
+      enabled: true,
+      checked: false,
+    });
+    expect(f.menu()[3]?.label).toContain("同时停止记忆服务");
+    f.click(3);
+    expect(f.app.quit).toHaveBeenCalledOnce();
+    dispose();
+    expect(f.tray.eventNames()).toEqual([]);
+  });
   it("rebuilds Spanish and Chinese labels without changing login or stopping services", async () => {
     const f = fixture();
     f.install();

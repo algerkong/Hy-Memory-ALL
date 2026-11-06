@@ -177,18 +177,25 @@ def _receipt(value: object) -> RuntimeReceipt | None:
 
 
 def _runtime_token(data_dir: Path) -> str | None:
-    if os.name != "posix":
-        return None
     target = data_dir / "runtime-token"
     try:
         metadata = target.lstat()
         if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
             return None
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
+        if os.name == "nt":
+            from one_memory.windows_security import assert_private_path
+
+            assert_private_path(data_dir, directory=True)
+            assert_private_path(target, directory=False)
+        elif stat.S_IMODE(metadata.st_mode) & 0o077:
             return None
         if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
             return None
-        token = target.read_text(encoding="utf-8")
+        with target.open(encoding="utf-8") as stream:
+            token = stream.read(4097)
+        after = target.lstat()
+        if (metadata.st_dev, metadata.st_ino) != (after.st_dev, after.st_ino):
+            return None
     except (OSError, UnicodeError):
         return None
     return token if 0 < len(token) <= 4096 else None

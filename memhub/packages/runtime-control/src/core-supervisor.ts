@@ -15,6 +15,7 @@ import {
   recordSdkMigrationBlock,
   writeSdkMigrationLog,
 } from "./sdk-migration-log.js";
+import { requestWindowsProcessStop } from "./windows-process-stop.js";
 
 export interface CoreLaunch {
   command: string;
@@ -797,7 +798,20 @@ export class CoreSupervisor {
     }
 
     if (!this.exited) {
-      child.kill("SIGTERM");
+      if (process.platform === "win32" && child.pid !== undefined) {
+        try {
+          await requestWindowsProcessStop({
+            dataDir: this.options.dataDir,
+            kind: "core",
+            pid: child.pid,
+            instanceId: this.activeInstanceId,
+          });
+        } catch {
+          child.kill("SIGKILL");
+        }
+      } else {
+        child.kill("SIGTERM");
+      }
       const exitedGracefully =
         exitPromise &&
         (await Promise.race([

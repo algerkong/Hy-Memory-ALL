@@ -18,17 +18,23 @@ If you run into a problem, please open an Issue with the version, platform,repro
 
 ## 发行与平台合同
 
-源码当前固定使用公开 PyPI 正式版 `hy-memory==2.0.14`。MemHub 源码版本为 `1.0.6`
-（build 44），GitHub 仓库为
+源码当前固定使用公开 PyPI 正式版 `hy-memory==2.0.14`。本分支的 Windows 桌面预发布版本为
+`1.0.7-windows.1`（build 45）。上游 GitHub 仓库为
 [`Tencent-Hunyuan/Hy-Memory`](https://github.com/Tencent-Hunyuan/Hy-Memory)，npm 包名为
 `memhub-cli`。当前代码架构见
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 `v1.0.6` 的发行目标是 Linux x64/arm64 Runtime 与 macOS arm64 App 和 Runtime。
 Linux 制品由 GitHub Actions 在原生架构 runner 上构建并完成生命周期验收；macOS
-制品由发行流水线完成 Developer ID 签名、公证和验收后手动上传。Windows 不支持。
+制品由发行流水线完成 Developer ID 签名、公证和验收后手动上传。`v1.0.6` 不包含 Windows 制品。
 只有同时出现在 GitHub Release 与 `release-manifest.json` 中、且通过公开校验的制品才属于
 该版本的正式支持范围。
+
+本分支新增 Windows 10/11 x64 桌面预发布，使用独立的 `Windows desktop` GitHub Actions
+构建并验证 NSIS 安装包。下载入口为
+[`algerkong/Hy-Memory-ALL Releases`](https://github.com/algerkong/Hy-Memory-ALL/releases)；
+该预发布不等同于 Windows CLI/系统服务正式支持。安装与测试范围见
+[`docs/WINDOWS_DESKTOP.md`](docs/WINDOWS_DESKTOP.md)。
 
 安装流程、未来 npm Quick Start、已记录体积和数据生命周期见
 [`docs/INSTALLATION.md`](docs/INSTALLATION.md)。本地 HTTPS fake Release 的可重复验收入口为

@@ -1,12 +1,13 @@
 {
   "name": "@one-memory/desktop",
-  "version": "1.0.6",
+  "version": "1.0.7-windows.1",
   "private": true,
   "main": "dist/main.js",
   "scripts": {
     "dev": "pnpm build && electron .",
     "build": "pnpm --filter @one-memory/host-bridge build && pnpm --filter @one-memory/runtime-control build && pnpm --filter @one-memory/cli build && tsup",
     "package:mac:dir": "test -n \"$ONE_MEMORY_BUILD_NUMBER\" && export ONE_MEMORY_VERSION=$(node -p \"require('../../package.json').version\") && export ONE_MEMORY_COMMIT=$(git -C ../.. rev-parse HEAD) && pnpm --dir ../.. build:core:mac && pnpm --dir ../.. --filter @one-memory/web build && pnpm build && electron-builder --mac dir --arm64 -c.mac.identity=null -c.extraMetadata.version=$ONE_MEMORY_VERSION -c.buildVersion=$ONE_MEMORY_BUILD_NUMBER",
+    "package:win": "pnpm --dir ../.. package:win",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "node ../../scripts/assert-test-isolation.mjs && vitest run --maxWorkers=1"
   },
@@ -14,6 +15,7 @@
     "@types/node": "^26.4.0",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.3",
+    "playwright-core": "1.65.0",
     "tsup": "^8.5.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
@@ -76,9 +78,27 @@
       ]
     },
     "win": {
+      "icon": "assets/icon.png",
+      "artifactName": "MemHub-v${version}-windows-${arch}-setup.${ext}",
       "target": [
-        "nsis"
-      ]
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false
     }
   },
   "dependencies": {

@@ -36,7 +36,9 @@ test("installation docs disclose publication and lifecycle boundaries", async ()
   assert.match(installation, /npm `postinstall` 不下载 Runtime/);
   assert.match(installation, /Python Core.*系统 Python/s);
   assert.match(installation, /默认数据目录是 `~\/\.one-memory`/);
-  assert.match(installation, /Windows.*不支持/s);
+  assert.match(installation, /Windows 桌面预发布/);
+  assert.match(installation, /Windows 的 npm CLI.*目前不支持/s);
+  assert.match(installation, /WINDOWS_DESKTOP\.md/);
   assert.match(installation, /最低支持 macOS 13/);
   assert.match(installation, /手动下载新版本/);
   assert.match(installation, /auto-updater/);

@@ -6,19 +6,17 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  rename,
-  rmdir,
-  unlink,
-} from "node:fs/promises";
+import { chmod, mkdir, open, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { inspect } from "node:util";
 import { isHostId } from "@one-memory/contracts";
+import {
+  assertPrivatePath,
+  assertPrivateStat,
+  protectWindowsPrivatePath,
+  syncPrivateDirectory,
+} from "./private-storage.js";
 
 /**
  * Trusted local control plane, not an MCP tool or an HTTP authentication route.
@@ -26,10 +24,9 @@ import { isHostId } from "@one-memory/contracts";
  * may approve/revoke grants. A host label is metadata, never authentication.
  *
  * Use a dedicated directory under a trusted parent on a local filesystem that
- * honors atomic rename and POSIX mode bits. Broader ACLs must be excluded by the
- * installer. This does not defend against malicious same-user processes, a
+ * honors atomic rename and POSIX mode bits or current-user Windows DACLs.
+ * This does not defend against malicious same-user processes, a
  * compromised installer/broker, or restoring an old store across restarts.
- * Windows requires an ACL-backed implementation and is deliberately unsupported.
  *
  * Broker integration must authorize every request with its transport secret and
  * the complete effective scopes (including any Core workspace expansion). Core
@@ -186,7 +183,7 @@ export class HostGrantStore {
   #observedDigest: string | undefined;
 
   private constructor(directory: string, options: HostGrantStoreOptions) {
-    if (process.platform === "win32" || typeof process.getuid !== "function") {
+    if (process.platform !== "win32" && typeof process.getuid !== "function") {
       fail("host_grant_platform_unsupported");
     }
     if (
@@ -219,6 +216,7 @@ export class HostGrantStore {
         throw error;
       }
       await chmod(store.#directory, 0o700);
+      await protectWindowsPrivatePath(store.#directory, "directory");
       await store.#checkDirectory();
       await store.#commit({
         schemaVersion: 1,
@@ -487,8 +485,7 @@ export class HostGrantStore {
   }
 
   async #checkDirectory(): Promise<void> {
-    const info = await lstat(this.#directory);
-    checkPrivate(info, "directory");
+    const info = await checkPrivatePath(this.#directory, "directory");
     if (
       this.#directoryIdentity &&
       (info.dev !== this.#directoryIdentity.dev ||
@@ -504,7 +501,7 @@ export class HostGrantStore {
     for (;;) {
       await this.#checkDirectory();
       const file = path.join(this.#directory, FILE_NAME);
-      checkPrivate(await lstat(file), "file");
+      const expected = await checkPrivatePath(file, "file");
       const handle = await open(
         file,
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -519,6 +516,10 @@ export class HostGrantStore {
           continue;
         }
         checkPrivate(info, "file");
+        if (info.dev !== expected.dev || info.ino !== expected.ino) {
+          if (performance.now() >= deadline) fail("host_grant_store_busy");
+          continue;
+        }
         if (info.size > MAX_STORE_BYTES) fail("host_grant_store_corrupt");
         const data = parseStore(await handle.readFile("utf8"));
         this.#observe(data);
@@ -576,7 +577,7 @@ export class HostGrantStore {
       // Never steal a timed-out lock: a paused writer may still own it. A crash
       // requires explicit recovery with all writers stopped, not a store reset.
       try {
-        checkPrivate(await lstat(lock), "directory");
+        await checkPrivatePath(lock, "directory");
       } catch (error) {
         if (!hasCode(error, "ENOENT")) throw error;
       }
@@ -604,6 +605,7 @@ export class HostGrantStore {
       } finally {
         await handle.close();
       }
+      await checkPrivatePath(temporary, "file");
       if (previousRevision !== undefined) {
         const current = await this.#read();
         if (
@@ -614,15 +616,7 @@ export class HostGrantStore {
       }
       await rename(temporary, path.join(this.#directory, FILE_NAME));
       created = false;
-      const directory = await open(
-        this.#directory,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-      );
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
+      await syncPrivateDirectory(this.#directory);
       this.#observe(data);
     } finally {
       if (created) await unlink(temporary);
@@ -939,14 +933,23 @@ function parseStore(raw: string): StoreData {
 }
 
 function checkPrivate(info: Stats, kind: "directory" | "file"): void {
-  if (
-    (kind === "directory"
-      ? !info.isDirectory()
-      : !info.isFile() || info.nlink !== 1) ||
-    info.uid !== process.getuid?.() ||
-    (info.mode & 0o7777) !== (kind === "directory" ? 0o700 : 0o600)
-  )
+  try {
+    assertPrivateStat(info, kind);
+  } catch {
     fail("host_grant_store_unsafe");
+  }
+}
+
+async function checkPrivatePath(
+  target: string,
+  kind: "directory" | "file",
+): Promise<Stats> {
+  try {
+    return await assertPrivatePath(target, kind);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) throw error;
+    fail("host_grant_store_unsafe");
+  }
 }
 
 function hasCode(error: unknown, code: string): boolean {

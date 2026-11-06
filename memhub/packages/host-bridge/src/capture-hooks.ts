@@ -14,6 +14,7 @@ import path from "node:path";
 
 import type { RecallHostLayout, RecallRuntime } from "./recall-installer.js";
 import { sameShellCommand, shellWords } from "./shell-words.js";
+import { windowsHookCommand } from "./windows-hook-command.js";
 
 /** A place on the host that may still hold something of ours, which nothing
  * here can settle: a person has to look. */
@@ -65,7 +66,18 @@ export function failOpenHookCommand(
   args: string,
   mode: "silent" | "context",
   dataDir?: string,
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  if (platform === "win32") {
+    const words = shellWords(args);
+    if (!words) throw new Error("windows_hook_command_invalid");
+    return windowsHookCommand(
+      binary,
+      words,
+      mode,
+      dataDir ? { ONE_MEMORY_DATA_DIR: dataDir } : {},
+    );
+  }
   const quoted = quoteCaptureCommand(binary);
   const prefix =
     dataDir !== undefined && dataDir !== ""

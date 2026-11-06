@@ -35,14 +35,16 @@ interface TrayOptions {
 }
 
 export function installBackgroundTray(options: TrayOptions): () => void {
-  if (options.platform !== "darwin") return () => {};
+  if (options.platform !== "darwin" && options.platform !== "win32")
+    return () => {};
   const { app } = options;
   const iconPath = app.isPackaged
     ? path.join(options.resourcesPath, "desktop", "icon.png")
     : path.join(options.appPath, "assets", "icon.png");
   const image = options.createImage(iconPath);
   if (image.isEmpty()) throw new Error("desktop_tray_icon_unavailable");
-  const tray = options.createTray(image.resize({ width: 18, height: 18 }));
+  const size = options.platform === "win32" ? 32 : 18;
+  const tray = options.createTray(image.resize({ width: size, height: size }));
   let disposed = false;
   const productName = options.productName ?? "MemHub";
   tray.setToolTip(productName);
@@ -121,6 +123,10 @@ export function installBackgroundTray(options: TrayOptions): () => void {
     // Refresh before the native menu opens, including changes made in Settings.
     tray.on("mouse-down", () => void refresh());
     tray.on("right-click", () => void refresh());
+    if (options.platform === "win32") {
+      tray.on("click", options.open);
+      tray.on("double-click", options.open);
+    }
   } catch (error) {
     tray.destroy();
     throw error;
@@ -131,6 +137,8 @@ export function installBackgroundTray(options: TrayOptions): () => void {
     unsubscribeLanguage?.();
     tray.removeAllListeners("mouse-down");
     tray.removeAllListeners("right-click");
+    tray.removeAllListeners("click");
+    tray.removeAllListeners("double-click");
     tray.destroy();
   };
 }

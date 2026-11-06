@@ -52,6 +52,12 @@ export {
   createClaudeCodeTarget,
 } from "./memmy-adapter/claude-code/target.js";
 export {
+  assertPrivatePath,
+  assertPrivateStat,
+  protectWindowsPrivatePath,
+  syncPrivateDirectory,
+} from "./private-storage.js";
+export {
   type ConnectionControlRequest,
   RecallBroker,
   type RecallBrokerOptions,

@@ -8,7 +8,7 @@ MemHub `v1.0.6`（build 44）的发行目标如下：
 | Linux arm64 | Runtime tar.gz | GitHub Actions 原生 arm64 runner |
 | macOS arm64 | DMG 与 Runtime tar.gz | Developer ID 签名、公证和原生 arm64 验收 |
 | macOS x64 | 无 | 本版本不提供 Intel 构建 |
-| Windows | 无 | 当前不支持 |
+| Windows | 无 | v1.0.6 不支持；本分支的桌面预发布见下文 |
 
 正式支持以对应 GitHub Release 的 `release-manifest.json` 为准。Manifest 记录版本、
 build、Git commit、协议范围、文件大小和 SHA-256；缺少条目的平台不属于该版本支持范围。
@@ -19,6 +19,16 @@ GitHub 不保存 Apple 私钥。所有平台制品核对完成后再发布 Relea
 
 最低支持 macOS 13。当前更新方式是从 GitHub Releases 手动下载新版本，不包含
 auto-updater。
+
+## Windows 桌面预发布
+
+本分支的 `1.0.7-windows.1`（build 45）单独提供 Windows 10/11 x64 桌面 NSIS 安装包，
+不改变上表的 `v1.0.6` 发行合同。下载、签名状态、验证证据及开发打包入口见
+[`WINDOWS_DESKTOP.md`](WINDOWS_DESKTOP.md)。
+
+Windows 的 npm CLI 受管安装、系统服务、升级与回滚目前不支持，不属于此预发布范围。
+Windows ARM64 也不提供安装包。预发布使用独立的构建和冒烟收据，不在现有
+Linux/macOS `release-manifest.json` 中冒充已通过完整 Windows 服务验收。
 
 ## 公开安装方式
 

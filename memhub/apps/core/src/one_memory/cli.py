@@ -728,10 +728,16 @@ def serve(*, maintenance: bool = False) -> None:
         diagnostic_log_level,
     )
     from one_memory.log_file import start_logging_to_file
-    from one_memory.parent_watchdog import ParentWatchdog
+    from one_memory.parent_watchdog import ParentWatchdog, StopRequestWatchdog
     from one_memory.runtime import CoreRuntime, parent_pid
 
     settings = load_settings()
+    if sys.platform == "win32":
+        from one_memory.windows_security import protect_private_path
+
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        protect_private_path(settings.data_dir, directory=True)
+        StopRequestWatchdog(settings.data_dir, settings.instance_id).start()
     if not maintenance:
         _refuse_unmigrated_home(settings.data_dir)
     # HY resolves some trace paths at import time and its pipeline path when

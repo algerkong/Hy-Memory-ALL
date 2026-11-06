@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import type {
   ContextSearchRequest,
@@ -15,6 +15,7 @@ import {
   isContextSearchRequest,
 } from "./context-protocol.js";
 import { readDiscovery } from "./discovery.js";
+import { assertPrivatePath, assertPrivateStat } from "./private-storage.js";
 
 export type HostCredentialProvider = () => string | Promise<string>;
 
@@ -118,26 +119,25 @@ export class BrokerClientError extends Error {
   }
 }
 
-/** Installer-owned POSIX file: raw omhg_v1_ token with an optional final LF.
+/** Installer-owned private file: raw omhg_v1_ token with an optional final LF.
  * Dedicated immediate parent must be owner-only; ancestors/ACLs are installer
  * responsibilities. No JSON, no automatic repair, no credential caching. Same
- * OS-account adversaries are outside this boundary. Windows needs ACL support.
+ * OS-account adversaries are outside this boundary.
  * The environment is deliberately read only by executable entry points. */
 export async function readHostCredentialFile(
   targetPath: string,
 ): Promise<string> {
   try {
     if (
-      process.platform === "win32" ||
-      typeof process.getuid !== "function" ||
+      (process.platform !== "win32" && typeof process.getuid !== "function") ||
       typeof targetPath !== "string" ||
       !path.isAbsolute(targetPath) ||
       targetPath.includes("\0")
     ) {
       throw new BrokerClientError("host_credential_unavailable");
     }
-    checkPrivateCredentialNode(await lstat(path.dirname(targetPath)), true);
-    checkPrivateCredentialNode(await lstat(targetPath), false);
+    await assertPrivatePath(path.dirname(targetPath), "directory");
+    const expected = await assertPrivatePath(targetPath, "file");
     const handle = await open(
       targetPath,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -145,6 +145,8 @@ export async function readHostCredentialFile(
     try {
       const info = await handle.stat();
       checkPrivateCredentialNode(info, false);
+      if (info.dev !== expected.dev || info.ino !== expected.ino)
+        throw new BrokerClientError("host_credential_unavailable");
       if (info.size < 51 || info.size > 52)
         throw new BrokerClientError("host_credential_unavailable");
       // Bounded even if a faulty writer grows the file after stat.
@@ -176,11 +178,9 @@ export async function readHostCredentialFile(
 }
 
 function checkPrivateCredentialNode(info: Stats, directory: boolean): void {
-  if (
-    (directory ? !info.isDirectory() : !info.isFile() || info.nlink !== 1) ||
-    info.uid !== process.getuid?.() ||
-    (info.mode & 0o7777) !== (directory ? 0o700 : 0o600)
-  ) {
+  try {
+    assertPrivateStat(info, directory ? "directory" : "file");
+  } catch {
     throw new BrokerClientError("host_credential_unavailable");
   }
 }

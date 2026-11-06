@@ -12,6 +12,8 @@ import {
 import path from "node:path";
 import { isHostId } from "@one-memory/contracts";
 import {
+  assertPrivatePath,
+  assertPrivateStat,
   createClaudeCodeRemovalTarget,
   createClaudeCodeTarget,
   HostGrantError,
@@ -21,6 +23,7 @@ import {
   type HostReadTool,
   isPluginCacheBookkeeping,
   readHostCredentialFile,
+  syncPrivateDirectory,
 } from "@one-memory/host-bridge";
 import {
   applyRecallInstall,
@@ -116,7 +119,7 @@ export interface HostRefreshReport {
 export const LOCAL_EXPERIENCE_UNAVAILABLE = "体验版暂不支持";
 
 /** Trusted local Runtime control plane. Never exposed through MCP or the Core API.
- * POSIX local storage, with a trusted owner-controlled data root; same-user
+ * Private local storage, with a trusted owner-controlled data root; same-user
  * adversaries and broader ACLs require OS-level isolation, not this store.
  */
 export class HostPermissions {
@@ -134,7 +137,7 @@ export class HostPermissions {
     runtime: RecallRuntime,
     options: { syncHookAssetsDirectory?: string } = {},
   ): Promise<HostPermissions> {
-    if (process.platform === "win32" || typeof process.getuid !== "function") {
+    if (process.platform !== "win32" && typeof process.getuid !== "function") {
       throw new Error("host_permission_platform_unsupported");
     }
     dataDir = path.resolve(dataDir);
@@ -149,7 +152,7 @@ export class HostPermissions {
         : await HostGrantStore.open(grants);
       const installations = path.join(directory, "installations");
       if (created) await createPrivateDirectory(installations);
-      checkPrivate(await lstat(installations), true);
+      await assertPrivatePath(installations, "directory");
       return new HostPermissions(
         dataDir,
         directory,
@@ -919,16 +922,16 @@ export class HostPermissions {
   private async checkStorage(): Promise<void> {
     await storageGuard(async () => {
       await checkDataRoot(this.dataDir);
-      const current = await lstat(this.directory);
+      const current = await assertPrivatePath(this.directory, "directory");
       checkPrivate(current, true);
       if (
         current.dev !== this.directoryIdentity.dev ||
         current.ino !== this.directoryIdentity.ino
       )
         throw new Error("host_permission_storage_unsafe");
-      checkPrivate(
-        await lstat(path.join(this.directory, "installations")),
-        true,
+      await assertPrivatePath(
+        path.join(this.directory, "installations"),
+        "directory",
       );
     });
     await this.hostGrantStore.listInstallations();
@@ -940,7 +943,7 @@ export class HostPermissions {
     return storageGuard(async () => {
       const directory = this.hostDirectory(layout);
       if ((await optionalStat(directory)) === null) return null;
-      checkPrivate(await lstat(directory), true);
+      await assertPrivatePath(directory, "directory");
       const file = path.join(directory, "installation.json");
       if ((await optionalStat(file)) === null)
         throw new Error("host_permission_storage_unsafe");
@@ -1277,6 +1280,10 @@ function permissionInput(
 }
 
 async function checkDataRoot(directory: string): Promise<void> {
+  if (process.platform === "win32") {
+    await assertPrivatePath(directory, "directory");
+    return;
+  }
   const info = await lstat(directory);
   if (
     !info.isDirectory() ||
@@ -1308,12 +1315,11 @@ async function checkDataRoot(directory: string): Promise<void> {
 }
 
 function checkPrivate(info: Stats, directory: boolean): void {
-  if (
-    (directory ? !info.isDirectory() : !info.isFile() || info.nlink !== 1) ||
-    info.uid !== process.getuid?.() ||
-    (info.mode & 0o7777) !== (directory ? 0o700 : 0o600)
-  )
+  try {
+    assertPrivateStat(info, directory ? "directory" : "file");
+  } catch {
     throw new Error("host_permission_storage_unsafe");
+  }
 }
 
 async function optionalStat(file: string): Promise<Stats | null> {
@@ -1328,18 +1334,18 @@ async function optionalStat(file: string): Promise<Stats | null> {
 async function createPrivateDirectory(directory: string): Promise<boolean> {
   try {
     await mkdir(directory, { mode: 0o700 });
-    checkPrivate(await lstat(directory), true);
+    await assertPrivatePath(directory, "directory");
     return true;
   } catch (error) {
     if (!isObject(error) || error.code !== "EEXIST") throw error;
-    checkPrivate(await lstat(directory), true);
+    await assertPrivatePath(directory, "directory");
     return false;
   }
 }
 
 async function privateRead(file: string): Promise<string> {
-  checkPrivate(await lstat(path.dirname(file)), true);
-  checkPrivate(await lstat(file), false);
+  await assertPrivatePath(path.dirname(file), "directory");
+  const expected = await assertPrivatePath(file, "file");
   const handle = await open(
     file,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -1347,6 +1353,8 @@ async function privateRead(file: string): Promise<string> {
   try {
     const info = await handle.stat();
     checkPrivate(info, false);
+    if (info.dev !== expected.dev || info.ino !== expected.ino)
+      throw new Error("host_permission_storage_unsafe");
     if (info.size > 1024 * 1024)
       throw new Error("host_permission_storage_unsafe");
     return await handle.readFile("utf8");
@@ -1356,9 +1364,9 @@ async function privateRead(file: string): Promise<string> {
 }
 
 async function privateWrite(file: string, content: string): Promise<void> {
-  checkPrivate(await lstat(path.dirname(file)), true);
+  await assertPrivatePath(path.dirname(file), "directory");
   const current = await optionalStat(file);
-  if (current !== null) checkPrivate(current, false);
+  if (current !== null) await assertPrivatePath(file, "file");
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = await open(
     temporary,
@@ -1373,16 +1381,9 @@ async function privateWrite(file: string, content: string): Promise<void> {
     await handle.writeFile(content, "utf8");
     await handle.sync();
     await handle.close();
+    await assertPrivatePath(temporary, "file");
     await rename(temporary, file);
-    const directory = await open(
-      path.dirname(file),
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    );
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await syncPrivateDirectory(path.dirname(file));
   } finally {
     await handle.close();
     await unlink(temporary).catch(() => {});

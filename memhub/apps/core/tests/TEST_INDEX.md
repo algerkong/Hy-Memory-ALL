@@ -318,9 +318,10 @@
 | `test_vendor_sqlite_audit.py` | `contract` | A1-08: the audit that says which SQLite is MemHub's and which is a vendor's. |
 | `test_visibility_background.py` | `integration` | The visibility background task: when it runs, and that it says so. |
 | `test_whole_turn_hy_input.py` | `contract` | D74: a turn reaches HY whole; only what HY will read counts toward the ceiling. |
+| `test_windows_desktop.py` | `contract` | Windows desktop ACL, authorized reads, snapshots and clean shutdown contracts. |
 | `test_windows_process_control.py` | `contract` | R-29：Windows 上 'os.kill' 不是发信号，是无条件杀进程。 |
 | `test_workbuddy_parsing.py` | `contract` | 覆盖 automation preserves query without claiming fresh human authorship、automation context attributes do not depend on order or quote style、quoted full automation envelope is not scheduled provenance 等 17 个场景。 |
 | `test_workspace_recall.py` | `contract` | Workspace memories were unreachable from every host; these pin the way in. |
 | `test_write_queue_lease_renewal.py` | `contract` | Rule 8: a lease must outlive the work it covers, and be renewed while it runs. |
 
-共 318 个测试文件。
+共 319 个测试文件。

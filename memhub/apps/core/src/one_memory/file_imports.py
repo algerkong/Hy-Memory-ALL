@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import asdict
@@ -23,6 +24,8 @@ from one_memory.imports.jobs import ImportJobStore
 from one_memory.imports.manual_transcript import ManualTranscriptError
 from one_memory.imports.memory_content import parse_memory_content
 from one_memory.imports.models import EvidenceContentKind, WrittenBy
+from one_memory.windows_files import is_reparse_point, open_windows_path
+from one_memory.windows_security import assert_private_path, protect_private_path
 
 
 class ImportPreviewMessage(BaseModel):
@@ -129,6 +132,11 @@ class _UploadOperation(BaseModel):
 
 
 def _sync_directory(directory: Path) -> None:
+    if sys.platform == "win32":
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or is_reparse_point(info):
+            raise ValueError("invalid_import_store_directory")
+        return
     descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
@@ -137,17 +145,23 @@ def _sync_directory(directory: Path) -> None:
 
 
 def _read_private_record(path: Path) -> bytes:
-    descriptor = os.open(
-        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    )
+    before = path.lstat()
+    if sys.platform == "win32":
+        assert_private_path(path, directory=False)
+        descriptor = open_windows_path(path, directory=False)
+    else:
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
     with os.fdopen(descriptor, "rb") as source:
         info = os.fstat(source.fileno())
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_mode & 0o077
+            or (sys.platform != "win32" and info.st_mode & 0o077)
             or (hasattr(os, "getuid") and info.st_uid != os.getuid())
             or info.st_size > 16_384
+            or (before.st_dev, before.st_ino) != (info.st_dev, info.st_ino)
         ):
             raise ValueError("invalid_import_operation_file")
         contents = source.read(16_385)
@@ -167,7 +181,38 @@ def _read_private_record(path: Path) -> bytes:
             or stat.S_ISLNK(current.st_mode)
         ):
             raise ValueError("changed_import_operation_file")
+        assert_private_path(path, directory=False)
         return contents
+
+
+def _require_directory(path: Path, *, legacy_parent: bool = False) -> None:
+    info = path.lstat()
+    if sys.platform == "win32":
+        assert_private_path(path, directory=True)
+    elif (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_mode & (0o022 if legacy_parent else 0o077)
+        or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+    ):
+        raise ValueError("invalid_import_store_directory")
+
+
+def _make_directory(path: Path, *, parents: bool = False, exist_ok: bool = True) -> None:
+    path.mkdir(parents=parents, exist_ok=exist_ok, mode=0o700)
+    protect_private_path(path, directory=True)
+
+
+def _require_upload_file(path: Path) -> None:
+    info = path.lstat()
+    if sys.platform == "win32":
+        # A committed upload deliberately hardlinks its messages into ready.
+        assert_private_path(path, directory=False, allow_hardlinks=True)
+    elif (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_mode & 0o077
+        or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+    ):
+        raise ValueError("invalid_upload_file")
 
 
 class FileImportStore:
@@ -209,23 +254,11 @@ class FileImportStore:
     def _operation_directory(self, *, create: bool = False) -> Path:
         directory = self.root / "operations"
         if create:
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        root_info = self.root.lstat()
-        if (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_mode & 0o022
-            or (hasattr(os, "getuid") and root_info.st_uid != os.getuid())
-        ):
-            raise ValueError("invalid_import_store_directory")
+            _make_directory(self.root, parents=True)
+        _require_directory(self.root, legacy_parent=True)
         if create:
-            directory.mkdir(exist_ok=True, mode=0o700)
-        info = directory.lstat()
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or info.st_mode & 0o077
-            or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-        ):
-            raise ValueError("invalid_import_operation_directory")
+            _make_directory(directory)
+        _require_directory(directory)
         return directory
 
     def _operation_record(self, operation_id: str) -> _UploadOperation | None:
@@ -252,13 +285,7 @@ class FileImportStore:
         upload_id = UUID(record.upload_id)
         try:
             directory = self.root / "staging" / record.upload_id
-            info = directory.lstat()
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_mode & 0o077
-                or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-            ):
-                raise ValueError("invalid_upload_directory")
+            _require_directory(directory)
             path = directory / "receipt.json"
             contents = _read_private_record(path)
             receipt = FileImportReceipt.model_validate_json(contents)
@@ -273,13 +300,7 @@ class FileImportStore:
                 raise ValueError("import_upload_identity_mismatch")
             upload_state = "committed" if receipt.committed else "staged"
             for name in ("original", "messages.jsonl"):
-                info = (directory / name).lstat()
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_mode & 0o077
-                    or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-                ):
-                    raise ValueError("invalid_upload_file")
+                _require_upload_file(directory / name)
             if not receipt.committed:
                 target = self.root / "ready" / receipt.source_id / f"{receipt.checksum}.jsonl"
                 with suppress(FileNotFoundError):
@@ -312,6 +333,7 @@ class FileImportStore:
         )
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                protect_private_path(temporary, directory=False)
                 output.write(record.model_dump_json())
                 output.flush()
                 os.fsync(output.fileno())
@@ -391,18 +413,14 @@ class FileImportStore:
             raise
         upload_id = upload_id or uuid4()
         directory = self.root / "staging" / str(upload_id)
+        if sys.platform == "win32":
+            _make_directory(self.root, parents=True)
         if durable:
-            directory.parent.mkdir(exist_ok=True, mode=0o700)
-            info = directory.parent.lstat()
+            _make_directory(directory.parent)
             # Legacy uploads create this container under the caller's umask.
             # Read/traverse bits are compatible; writable parents are not.
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_mode & 0o022
-                or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-            ):
-                raise ValueError("invalid_import_staging_directory")
-        directory.mkdir(parents=True, mode=0o700)
+            _require_directory(directory.parent, legacy_parent=True)
+        _make_directory(directory, parents=True, exist_ok=False)
         checksum = hashlib.sha256(payload).hexdigest()
         receipt = FileImportReceipt(
             upload_id=upload_id,
@@ -455,6 +473,7 @@ class FileImportStore:
             (directory / "receipt.json").write_text(receipt.model_dump_json(), encoding="utf-8")
             for file in directory.iterdir():
                 file.chmod(0o600)
+                protect_private_path(file, directory=False)
                 if durable:
                     with file.open("rb") as staged:
                         os.fsync(staged.fileno())
@@ -489,7 +508,7 @@ class FileImportStore:
             if receipt.committed:
                 return receipt
             target = self.root / "ready" / receipt.source_id
-            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _make_directory(target, parents=True)
             directory = self.root / "staging" / str(upload_id)
             with suppress(FileExistsError):
                 os.link(directory / "messages.jsonl", target / f"{receipt.checksum}.jsonl")
@@ -498,6 +517,7 @@ class FileImportStore:
             try:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                    protect_private_path(temporary, directory=False)
                     output.write(receipt.model_dump_json())
                     output.flush()
                     os.fsync(output.fileno())
@@ -515,7 +535,7 @@ class FileImportStore:
 
     def _lock(self, upload_id: UUID) -> FileLock:
         directory = self.root / "locks"
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _make_directory(directory, parents=True)
         return FileLock(directory / f"{upload_id}.lock", timeout=5, mode=0o600)
 
 

@@ -19,6 +19,7 @@ export interface DesktopTestIsolation {
 export function resolveDesktopTestIsolation(
   environment: NodeJS.ProcessEnv,
   electronHome: string,
+  platform: NodeJS.Platform = process.platform,
 ): DesktopTestIsolation | null {
   const requestedHome = environment.ONE_MEMORY_DESKTOP_TEST_HOME;
   if (requestedHome === undefined) return null;
@@ -32,21 +33,21 @@ export function resolveDesktopTestIsolation(
   if (!realHome || !home || !dataDir || !hostHome) {
     throw new Error("desktop_test_isolation_paths_missing");
   }
-  const normalizedReal = safeAbsolute(realHome);
-  const normalizedElectron = safeAbsolute(electronHome);
-  const normalizedHome = safeAbsolute(home);
-  const normalizedData = safeAbsolute(dataDir);
-  const normalizedHost = safeAbsolute(hostHome);
+  const normalizedReal = safeAbsolute(realHome, platform);
+  const normalizedElectron = safeAbsolute(electronHome, platform);
+  const normalizedHome = safeAbsolute(home, platform);
+  const normalizedData = safeAbsolute(dataDir, platform);
+  const normalizedHost = safeAbsolute(hostHome, platform);
   if (
-    normalizedElectron !== normalizedReal &&
-    normalizedElectron !== normalizedHome
+    !samePath(normalizedElectron, normalizedReal, platform) &&
+    !samePath(normalizedElectron, normalizedHome, platform)
   ) {
     throw new Error("desktop_test_real_home_mismatch");
   }
   if (
-    inside(normalizedHome, normalizedReal) ||
-    inside(normalizedData, normalizedReal) ||
-    inside(normalizedHost, normalizedReal)
+    inside(normalizedHome, normalizedReal, platform) ||
+    inside(normalizedData, normalizedReal, platform) ||
+    inside(normalizedHost, normalizedReal, platform)
   ) {
     throw new Error("desktop_test_real_home_refused");
   }
@@ -67,25 +68,53 @@ export function resolveDesktopTestIsolation(
   }
   return {
     home: normalizedHome,
-    userData: path.join(
-      normalizedHome,
-      "Library",
-      "Application Support",
-      "MemHub Test",
-    ),
+    userData:
+      platform === "win32"
+        ? path.win32.join(normalizedHome, "AppData", "Roaming", "MemHub Test")
+        : path.join(
+            normalizedHome,
+            "Library",
+            "Application Support",
+            "MemHub Test",
+          ),
   };
 }
 
-function safeAbsolute(value: string): string {
-  if (!path.isAbsolute(value) || /[\0\r\n]/.test(value)) {
+function safeAbsolute(
+  value: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const paths = platform === "win32" ? path.win32 : path;
+  if (!paths.isAbsolute(value) || /[\0\r\n]/.test(value)) {
     throw new Error("desktop_test_isolation_path_invalid");
   }
-  const normalized = path.normalize(value);
+  const normalized = paths.normalize(value);
   return existsSync(normalized) ? realpathSync.native(normalized) : normalized;
 }
 
-function inside(candidate: string, parent: string): boolean {
-  return candidate === parent || candidate.startsWith(`${parent}${path.sep}`);
+function samePath(
+  left: string,
+  right: string,
+  platform: NodeJS.Platform,
+): boolean {
+  return platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function inside(
+  candidate: string,
+  parent: string,
+  platform: NodeJS.Platform,
+): boolean {
+  const paths = platform === "win32" ? path.win32 : path;
+  const relative = paths.relative(parent, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${paths.sep}`) &&
+      !paths.isAbsolute(relative))
+  );
 }
 
 /**
@@ -164,6 +193,12 @@ export function resolvePackagedCommit(
 export function isCanonicalDailyDataDir(
   home: string,
   dataDir: string,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return safeAbsolute(dataDir) === path.join(safeAbsolute(home), ".one-memory");
+  const paths = platform === "win32" ? path.win32 : path;
+  return samePath(
+    safeAbsolute(dataDir, platform),
+    paths.join(safeAbsolute(home, platform), ".one-memory"),
+    platform,
+  );
 }

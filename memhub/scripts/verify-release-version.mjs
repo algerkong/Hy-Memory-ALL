@@ -48,23 +48,26 @@ function parseArgs(arguments_) {
   return options;
 }
 
-async function packageVersions() {
+async function packageVersions(repositoryRoot) {
   const versions = {};
   for (const relative of packageFiles) {
     const document = JSON.parse(
-      await readFile(path.join(root, relative), "utf8"),
+      await readFile(path.join(repositoryRoot, relative), "utf8"),
     );
     versions[relative] = assertSemver(document.version, `${relative} version`);
   }
   const pyproject = await readFile(
-    path.join(root, "apps/core/pyproject.toml"),
+    path.join(repositoryRoot, "apps/core/pyproject.toml"),
     "utf8",
   );
   const match = /^version\s*=\s*"([^"]+)"\s*$/m.exec(pyproject);
   if (!match)
     throw new Error("apps/core/pyproject.toml project version missing");
   versions["apps/core/pyproject.toml"] = match[1];
-  const lock = await readFile(path.join(root, "apps/core/uv.lock"), "utf8");
+  const lock = await readFile(
+    path.join(repositoryRoot, "apps/core/uv.lock"),
+    "utf8",
+  );
   const lockMatch =
     /\[\[package\]\]\s*\nname = "one-memory"\s*\nversion = "([^"]+)"/m.exec(
       lock,
@@ -78,10 +81,11 @@ async function packageVersions() {
 export async function verifyReleaseVersion(
   arguments_,
   environment = process.env,
+  repositoryRoot = root,
 ) {
   const options = parseArgs(arguments_);
-  const version = readReleaseVersion(root);
-  const canonicalBuildNumber = readReleaseBuildNumber(root);
+  const version = readReleaseVersion(repositoryRoot);
+  const canonicalBuildNumber = readReleaseBuildNumber(repositoryRoot);
   const suppliedVersion =
     options.version ?? environment.ONE_MEMORY_VERSION?.trim();
   if (suppliedVersion !== undefined && suppliedVersion !== "") {
@@ -96,9 +100,9 @@ export async function verifyReleaseVersion(
     suppliedVersion === undefined || suppliedVersion === ""
       ? environment
       : { ...environment, ONE_MEMORY_VERSION: suppliedVersion },
-    root,
+    repositoryRoot,
   );
-  const versions = await packageVersions();
+  const versions = await packageVersions(repositoryRoot);
   const pythonVersion = pythonPackageVersion(version);
   const mismatches = Object.entries(versions).filter(([file, value]) =>
     file.startsWith("apps/core/") ? value !== pythonVersion : value !== version,
@@ -121,7 +125,7 @@ export async function verifyReleaseVersion(
   }
   resolveBuildNumber(
     { ...environment, ONE_MEMORY_BUILD_NUMBER: String(buildNumber) },
-    root,
+    repositoryRoot,
   );
 
   if (options.channel !== "development") {

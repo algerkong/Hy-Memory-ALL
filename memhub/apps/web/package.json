@@ -1,6 +1,6 @@
 {
   "name": "@one-memory/web",
-  "version": "1.0.6",
+  "version": "1.0.7-windows.1",
   "private": true,
   "type": "module",
   "scripts": {

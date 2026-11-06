@@ -631,7 +631,7 @@ describe.skipIf(process.platform === "win32")("HostGrantStore", () => {
 
   it("prevents lost updates across independent Node processes", async () => {
     const { directory, store } = await fixture();
-    const moduleUrl = new URL("./host-grants.ts", import.meta.url).href;
+    const moduleUrl = new URL("../dist/index.cjs", import.meta.url).href;
     const script = `
       import { HostGrantStore } from ${JSON.stringify(moduleUrl)};
       const store = await HostGrantStore.open(process.argv[1]);
@@ -880,7 +880,7 @@ describe.skipIf(process.platform === "win32")("HostGrantStore", () => {
 
   it("also checks expected revisions across independent Node processes", async () => {
     const { directory, store, receipt } = await approved();
-    const moduleUrl = new URL("./host-grants.ts", import.meta.url).href;
+    const moduleUrl = new URL("../dist/index.cjs", import.meta.url).href;
     const script = `
       import { HostGrantStore } from ${JSON.stringify(moduleUrl)};
       const store = await HostGrantStore.open(process.argv[1]);

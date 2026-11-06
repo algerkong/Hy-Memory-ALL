@@ -3,6 +3,10 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  assertWindowsWritablePath,
+  protectWindowsPrivatePath,
+} from "../../private-storage.js";
 import { absolutePath, ClaudeAdapterError } from "./runtime-config.js";
 
 export function missing(error: unknown): boolean {
@@ -37,13 +41,21 @@ export async function readText(
 ): Promise<string | null> {
   await assertNoSymlinks(target);
   try {
+    const before = await lstat(target);
+    await assertWindowsWritablePath(target, "file");
     const handle = await open(
       target,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK,
     );
     try {
       const info = await handle.stat();
-      if (!info.isFile() || info.nlink !== 1 || info.size > limit)
+      if (
+        !info.isFile() ||
+        info.nlink !== 1 ||
+        info.size > limit ||
+        info.dev !== before.dev ||
+        info.ino !== before.ino
+      )
         throw new ClaudeAdapterError("unsafe_file");
       const data = Buffer.alloc(limit + 1);
       let offset = 0;
@@ -58,6 +70,10 @@ export async function readText(
         offset += bytesRead;
       }
       if (offset > limit) throw new ClaudeAdapterError("file_too_large");
+      await assertNoSymlinks(target);
+      const after = await lstat(target);
+      if (after.dev !== info.dev || after.ino !== info.ino)
+        throw new ClaudeAdapterError("unsafe_file");
       return new TextDecoder("utf-8", { fatal: true }).decode(
         data.subarray(0, offset),
       );
@@ -77,6 +93,7 @@ export async function writeText(
 ): Promise<void> {
   await assertNoSymlinks(target);
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await assertWindowsWritablePath(path.dirname(target), "directory");
   const temporary = path.join(
     path.dirname(target),
     `.mh-c01-${randomUUID()}.tmp`,
@@ -87,6 +104,7 @@ export async function writeText(
     created = true;
     try {
       await handle.chmod(mode);
+      await protectWindowsPrivatePath(temporary, "file");
       await handle.writeFile(content, "utf8");
       await handle.sync();
     } finally {
@@ -114,6 +132,7 @@ export async function withDirectoryLock<T>(
   for (;;) {
     try {
       await mkdir(lock, { mode: 0o700 });
+      await protectWindowsPrivatePath(lock, "directory");
       break;
     } catch (error) {
       if (

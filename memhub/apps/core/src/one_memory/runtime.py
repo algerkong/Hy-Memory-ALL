@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from types import TracebackType
 from typing import Protocol
 
@@ -93,12 +94,19 @@ def _kernel32() -> WindowsProcessApi:
     other platform, and this module is imported everywhere.
     """
     import ctypes
+    from ctypes import wintypes
 
     library = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    library.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    library.OpenProcess.restype = wintypes.HANDLE
+    library.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    library.GetExitCodeProcess.restype = wintypes.BOOL
+    library.CloseHandle.argtypes = (wintypes.HANDLE,)
+    library.CloseHandle.restype = wintypes.BOOL
 
     class Kernel32:
         def open_process(self, pid: int) -> int:
-            return int(library.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid))
+            return int(library.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or 0)
 
         def last_error(self) -> int:
             # `get_last_error` exists only on Windows, so the checker running
@@ -163,6 +171,10 @@ class CoreRuntime:
 
     def __enter__(self) -> "CoreRuntime":
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            from one_memory.windows_security import protect_private_path
+
+            protect_private_path(self.settings.data_dir, directory=True)
         try:
             self._lock.acquire()
         except Timeout as error:
@@ -188,15 +200,10 @@ class CoreRuntime:
             "started_at": datetime.now(UTC).isoformat(),
         }
         try:
-            if os.name == "posix":
-                _write_private_file(
-                    self._token_path,
-                    self.settings.api_token.get_secret_value(),
-                )
-            else:
-                # Windows attach remains disabled until the token is protected
-                # by a verified current-user SID/DACL implementation.
-                self._token_path.unlink(missing_ok=True)
+            _write_private_file(
+                self._token_path,
+                self.settings.api_token.get_secret_value(),
+            )
             _write_private_file(
                 self._receipt_path,
                 json.dumps(receipt, ensure_ascii=False, indent=2),
@@ -230,6 +237,10 @@ def _write_private_file(path: os.PathLike[str], content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        if sys.platform == "win32":
+            from one_memory.windows_security import protect_private_path
+
+            protect_private_path(Path(temporary), directory=False)
         os.replace(temporary, target)
         if os.name == "posix":
             os.chmod(target, 0o600)

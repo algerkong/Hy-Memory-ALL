@@ -1,5 +1,4 @@
 import os
-import pwd
 from pathlib import Path
 
 import pytest
@@ -24,7 +23,15 @@ PORT_KEYS = (
 def _assert_isolated_test_environment() -> None:
     if os.environ.get("ONE_MEMORY_TEST_ISOLATED") != "1":
         raise pytest.UsageError("run tests through scripts/run-tests-isolated.sh")
-    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    if os.name == "nt":
+        declared_home = os.environ.get("ONE_MEMORY_TEST_REAL_HOME")
+        if not declared_home:
+            raise pytest.UsageError("real Windows test home is missing")
+        real_home = Path(declared_home).resolve()
+    else:
+        import pwd
+
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
     home = Path(os.environ.get("HOME", "")).resolve()
     data_dir = Path(os.environ.get("ONE_MEMORY_DATA_DIR", "")).resolve()
     if home == real_home:

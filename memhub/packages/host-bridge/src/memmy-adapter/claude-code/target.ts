@@ -4,6 +4,10 @@ import { constants } from "node:fs";
 import { access, lstat } from "node:fs/promises";
 import path from "node:path";
 import {
+  assertPrivatePath,
+  assertWindowsWritablePath,
+} from "../../private-storage.js";
+import {
   type ClaudeInstallPlan,
   type ClaudeTargetOptions,
   type FileSnapshot,
@@ -39,28 +43,30 @@ function createTarget(claudeDirectory: string, options?: ClaudeTargetOptions) {
   const filePath = (name: string) => path.join(root, name);
   const journalPath = filePath(JOURNAL);
   const ensure = async () => {
-    if (process.platform === "win32" || typeof process.getuid !== "function")
+    if (process.platform !== "win32" && typeof process.getuid !== "function")
       throw new ClaudeAdapterError("platform_unsupported");
     await assertNoSymlinks(root);
     if (!(await lstat(root)).isDirectory())
       throw new ClaudeAdapterError("host_directory_unavailable");
+    await assertWindowsWritablePath(root, "directory");
   };
   const credentialMetadata = async () => {
     try {
       if (!options) throw new ClaudeAdapterError("invalid_install_plan");
       await assertNoSymlinks(options.config.credentialFile);
-      const info = await lstat(options.config.credentialFile);
-      const parent = await lstat(path.dirname(options.config.credentialFile));
+      const info = await assertPrivatePath(
+        options.config.credentialFile,
+        "file",
+      );
+      await assertPrivatePath(
+        path.dirname(options.config.credentialFile),
+        "directory",
+      );
       if (
         !info.isFile() ||
         info.nlink !== 1 ||
-        info.uid !== process.getuid?.() ||
-        (info.mode & 0o7777) !== 0o600 ||
         info.size < 51 ||
-        info.size > 52 ||
-        !parent.isDirectory() ||
-        parent.uid !== process.getuid?.() ||
-        (parent.mode & 0o7777) !== 0o700
+        info.size > 52
       )
         throw new Error();
       await access(options.nodeExecutable, constants.X_OK);

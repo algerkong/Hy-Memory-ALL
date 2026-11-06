@@ -2,12 +2,19 @@ import errno
 import hashlib
 import os
 import stat
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO
+
+from one_memory.windows_files import (
+    WindowsReparsePointError,
+    is_reparse_point,
+    open_windows_path,
+)
 
 DEFAULT_MAX_SOURCE_FILE_BYTES = 2 * 1024 * 1024 * 1024
 SENSITIVE_HOME_DIRECTORIES = {
@@ -80,8 +87,6 @@ class AuthorizedSourceFile:
 
 
 def _open_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
-    if not _supports_descriptor_relative_open():
-        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
     relative_parts = source.relative_path.parts
     if (
         source.relative_path.is_absolute()
@@ -89,6 +94,15 @@ def _open_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
         or any(part in {"", ".", ".."} for part in relative_parts)
     ):
         raise SourceAccessError(SourceAccessErrorCode.PATH_OUTSIDE_ROOT)
+    if sys.platform == "win32":
+        if any(
+            any(c in part for c in ":\\/\0\r\n") or part.endswith((" ", "."))
+            for part in relative_parts
+        ):
+            raise SourceAccessError(SourceAccessErrorCode.PATH_OUTSIDE_ROOT)
+        return _open_windows_relative_file(source)
+    if not _supports_descriptor_relative_open():
+        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
     child_directory_flags = directory_flags | os.O_NOFOLLOW
@@ -226,6 +240,63 @@ def _open_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
                     raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
 
 
+def _open_windows_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
+    directories: list[int] = []
+    descriptor: int | None = None
+    try:
+        # Absolute Win32 opens are safe only while every canonical ancestor is
+        # held without share-delete; no junction below the grant is followed.
+        for ancestor in (*reversed(source.root.parents), source.root):
+            directories.append(open_windows_path(ancestor, directory=True))
+        root_details = os.fstat(directories[-1])
+        if source.root_identity is not None and not _root_identity_matches_details(
+            source.root, root_details, source.root_identity
+        ):
+            raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+        requested_root = source.requested_root or source.root
+        if requested_root != source.root:
+            alias = open_windows_path(requested_root, directory=True, follow_leaf=True)
+            directories.append(alias)
+            alias_details = os.fstat(alias)
+            if (alias_details.st_dev, alias_details.st_ino) != (
+                root_details.st_dev,
+                root_details.st_ino,
+            ):
+                raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+        current = source.root
+        for part in source.relative_path.parts[:-1]:
+            current /= part
+            directories.append(open_windows_path(current, directory=True))
+        descriptor = open_windows_path(current / source.relative_path.name, directory=False)
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            raise SourceAccessError(SourceAccessErrorCode.NOT_REGULAR_FILE)
+        if not _same_file(
+            details, file_identity=source.file_identity, changed_ns=source.changed_ns
+        ):
+            raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+        if details.st_size > source.max_bytes:
+            raise SourceAccessError(SourceAccessErrorCode.FILE_TOO_LARGE)
+        _check_root_identity(requested_root, source.root_identity)
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = None
+        if not _close_descriptors(directories):
+            directories.clear()
+            stream.close()
+            raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
+        directories.clear()
+        return stream
+    except WindowsReparsePointError:
+        raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED) from None
+    except OSError:
+        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        _close_descriptors(directories)
+
+
 def _supports_descriptor_relative_open() -> bool:
     return (
         os.open in os.supports_dir_fd
@@ -245,7 +316,7 @@ def _relative_open_error(
             details = os.stat(component, dir_fd=parent_descriptor, follow_symlinks=False)
         except (OSError, TypeError, NotImplementedError):
             return SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
-        if stat.S_ISLNK(details.st_mode):
+        if stat.S_ISLNK(details.st_mode) or is_reparse_point(details):
             return SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
     return SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE)
 
@@ -316,7 +387,7 @@ class AuthorizedSourceRoot:
             details = os.lstat(candidate)
         except OSError:
             raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
-        if stat.S_ISLNK(details.st_mode):
+        if stat.S_ISLNK(details.st_mode) or is_reparse_point(details):
             raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
         if not stat.S_ISREG(details.st_mode):
             raise SourceAccessError(SourceAccessErrorCode.NOT_REGULAR_FILE)
@@ -342,8 +413,11 @@ class AuthorizedSourceRoot:
             self.access_check()
         _check_root_identity(self.requested_root or self.root, self.root_identity)
         logical = candidate if candidate.is_absolute() else self.root / candidate
-        if logical.is_symlink():
-            raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)
+        try:
+            logical_relative = logical.relative_to(self.root)
+        except ValueError:
+            raise SourceAccessError(SourceAccessErrorCode.PATH_OUTSIDE_ROOT) from None
+        _reject_symlink_components(self.root, logical_relative)
         try:
             resolved = logical.resolve(strict=True)
         except OSError:
@@ -484,5 +558,9 @@ def _reject_symlink_components(root: Path, relative: Path) -> None:
     current = root
     for component in relative.parts:
         current /= component
-        if current.is_symlink():
+        try:
+            details = current.lstat()
+        except OSError:
+            raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
+        if stat.S_ISLNK(details.st_mode) or is_reparse_point(details):
             raise SourceAccessError(SourceAccessErrorCode.SYMLINK_NOT_ALLOWED)

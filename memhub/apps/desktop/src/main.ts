@@ -133,6 +133,10 @@ import {
 } from "./startup-sdk-migration";
 import { resolveTrialProfile } from "./trial-profile";
 import { createWindowOptions } from "./window-options";
+import {
+  readWindowsLoginPreference,
+  setWindowsLoginPreference,
+} from "./windows-login-item";
 
 const developmentUrl =
   process.env.ONE_MEMORY_WEB_URL ?? "http://127.0.0.1:5173";
@@ -149,6 +153,7 @@ let runtimeDataDir: string | null = null;
 // stops one it could not compare with its own.
 let preserveRuntimeOnQuitReason: string | null = null;
 let runtimeServiceManagedByApp = false;
+let windowsLoginStartupSupported = false;
 let disposeTray: (() => void) | null = null;
 let disposeApplicationMenu: (() => void) | null = null;
 let languagePreferences: LanguagePreferences | null = null;
@@ -274,7 +279,47 @@ function currentRuntimeServiceState(): Promise<RuntimeServiceState> {
   });
 }
 
+async function currentLoginPreference() {
+  if (!runtimeDataDir) {
+    return { supported: false, enabled: false, status: "not-ready" };
+  }
+  if (process.platform === "win32") {
+    return readWindowsLoginPreference(
+      app,
+      process.execPath,
+      windowsLoginStartupSupported,
+    );
+  }
+  return readLoginPreference(
+    runtimeDataDir,
+    process.platform,
+    runtimeServiceManagedByApp,
+    currentRuntimeServiceState,
+  );
+}
+
+async function updateLoginPreference(input: unknown) {
+  if (!runtimeDataDir) throw new Error("runtime_not_ready");
+  if (process.platform === "win32") {
+    return setWindowsLoginPreference(
+      app,
+      process.execPath,
+      input,
+      windowsLoginStartupSupported,
+    );
+  }
+  return setLoginPreference(
+    runtimeDataDir,
+    process.platform,
+    input,
+    runtimeServiceManagedByApp,
+    currentRuntimeServiceState,
+  );
+}
+
 function prepareProtocol(): void {
+  if (process.platform === "win32")
+    app.setAppUserModelId("com.tencent.onememory");
   protocol.registerSchemesAsPrivileged([
     {
       scheme: "one-memory",
@@ -526,6 +571,14 @@ async function initialize(isQuitting: () => boolean): Promise<void> {
     (hostIntegrationEnabled || desktopTestIsolation !== null) &&
     installedApplication;
   runtimeServiceManagedByApp = appManagedRuntime;
+  windowsLoginStartupSupported =
+    app.isPackaged &&
+    process.platform === "win32" &&
+    trialProfile === null &&
+    !isolatedHourly &&
+    !preview &&
+    hostIntegrationEnabled &&
+    desktopTestIsolation === null;
   const runningPackagedHost =
     app.isPackaged && !isolatedHourly
       ? await resolveRunningPackagedHostPaths({
@@ -582,7 +635,9 @@ async function initialize(isQuitting: () => boolean): Promise<void> {
       stable?.captureCommand ??
       path.join(
         path.resolve(app.getAppPath(), "../.."),
-        "apps/core/.venv/bin",
+        process.platform === "win32"
+          ? "apps/core/.venv/Scripts"
+          : "apps/core/.venv/bin",
         process.platform === "win32" ? "one-memory.exe" : "one-memory",
       ),
     hermesProviderSource: path.join(
@@ -881,25 +936,13 @@ async function initialize(isQuitting: () => boolean): Promise<void> {
   );
   ipcMain.handle("one-memory:get-login-preference", (event) => {
     assertAllowedRenderer(event.senderFrame?.url);
-    return readLoginPreference(
-      dataDir,
-      process.platform,
-      appManagedRuntime,
-      currentRuntimeServiceState,
-    );
+    return currentLoginPreference();
   });
   ipcMain.handle("one-memory:set-login-preference", (event, input: unknown) => {
     assertAllowedRenderer(event.senderFrame?.url);
     return observeDesktopAction(
       "login_preference",
-      () =>
-        setLoginPreference(
-          dataDir,
-          process.platform,
-          input,
-          appManagedRuntime,
-          currentRuntimeServiceState,
-        ),
+      () => updateLoginPreference(input),
       { action: "set" },
     );
   });
@@ -1533,6 +1576,9 @@ async function initialize(isQuitting: () => boolean): Promise<void> {
         packaged: app.isPackaged,
         preview,
         install: async () => {
+          // NSIS already installs the executable/resources at a stable path.
+          // Windows hosts use that bundle, not the POSIX Runtime service layout.
+          if (process.platform === "win32") return;
           if (process.platform !== "darwin" && process.platform !== "linux") {
             throw new Error("packaged_runtime_platform_unsupported");
           }
@@ -1671,7 +1717,7 @@ async function initialize(isQuitting: () => boolean): Promise<void> {
       process.env.ONE_MEMORY_SMOKE_QUIT_MS ?? "0",
     );
     if (
-      !app.isPackaged &&
+      (!app.isPackaged || desktopTestIsolation !== null) &&
       Number.isFinite(smokeQuitMilliseconds) &&
       smokeQuitMilliseconds > 0
     ) {
@@ -1763,29 +1809,9 @@ if (desktopVersion !== null) {
         buildMenu: (template) => Menu.buildFromTemplate(template),
         open,
         reportError: (message) => dialog.showErrorBox("MemHub", message),
-        readLoginPreference: () =>
-          runtimeDataDir
-            ? readLoginPreference(
-                runtimeDataDir,
-                process.platform,
-                runtimeServiceManagedByApp,
-                currentRuntimeServiceState,
-              )
-            : Promise.resolve({
-                supported: false,
-                enabled: false,
-                status: "not-ready",
-              }),
-        setLoginPreference: (enabled) => {
-          if (!runtimeDataDir) throw new Error("runtime_not_ready");
-          return setLoginPreference(
-            runtimeDataDir,
-            process.platform,
-            { openAtLogin: enabled, userConfirmed: true },
-            runtimeServiceManagedByApp,
-            currentRuntimeServiceState,
-          );
-        },
+        readLoginPreference: currentLoginPreference,
+        setLoginPreference: (enabled) =>
+          updateLoginPreference({ openAtLogin: enabled, userConfirmed: true }),
         readRuntimeHosting: async () => {
           if (!runtimeDataDir || !app.isPackaged) return "unknown";
           // A Runtime whose build could not be read is never stopped by it.

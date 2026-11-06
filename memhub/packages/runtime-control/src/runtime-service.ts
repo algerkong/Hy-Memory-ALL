@@ -12,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { protectWindowsPrivatePath } from "@one-memory/host-bridge";
 
 import { processIsAlive } from "./core-supervisor.js";
 import { type DiagnosticSink, diagnosticError } from "./diagnostic-log.js";
@@ -78,6 +79,10 @@ export class RuntimeService {
 
   constructor(options: RuntimeServiceOptions) {
     this.options = options;
+  }
+
+  get instanceId(): string | null {
+    return this.receiptConnection?.instanceId ?? null;
   }
 
   async start(): Promise<void> {
@@ -203,6 +208,7 @@ export class RuntimeService {
     if (info.isSymbolicLink() || !info.isDirectory())
       throw new Error("runtime_service_data_directory_unsafe");
     await chmod(this.options.dataDir, 0o700);
+    await protectWindowsPrivatePath(this.options.dataDir, "directory");
     const lock = this.lockPath();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {

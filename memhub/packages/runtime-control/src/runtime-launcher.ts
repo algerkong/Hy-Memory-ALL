@@ -11,6 +11,7 @@ import {
   RuntimeDiscoveryError,
 } from "./discovery.js";
 import { readSdkMigrationBlock } from "./sdk-migration-log.js";
+import { requestWindowsProcessStop } from "./windows-process-stop.js";
 
 export interface RuntimeLaunch {
   command: string;
@@ -162,7 +163,11 @@ export async function stopRuntimeProcess(
   if (attachment.servicePid === null) {
     throw new RuntimeDiscoveryError("runtime_service_receipt_invalid");
   }
-  await terminateVerifiedRuntime(options, attachment.servicePid);
+  await terminateVerifiedRuntime(
+    options,
+    attachment.servicePid,
+    attachment.instanceId,
+  );
   return "stopped";
 }
 
@@ -221,7 +226,11 @@ export async function stopAllRuntimeProcesses(
     if (attachment.servicePid === null) {
       throw new RuntimeDiscoveryError("runtime_service_receipt_invalid");
     }
-    await terminateVerifiedRuntime(options, attachment.servicePid);
+    await terminateVerifiedRuntime(
+      options,
+      attachment.servicePid,
+      attachment.instanceId,
+    );
     stopped.push(attachment.servicePid);
   }
   const leasePid = await readRuntimeLeaseOwnerPid(options.dataDir);
@@ -269,10 +278,20 @@ function settling(error: unknown): boolean {
 async function terminateVerifiedRuntime(
   options: StopRuntimeOptions,
   pid: number,
+  instanceId: string,
 ): Promise<void> {
   const alive = options.processIsAlive ?? processIsAlive;
   const signal = options.signalProcess ?? process.kill;
-  signal(pid, "SIGTERM");
+  if (process.platform === "win32" && options.signalProcess === undefined) {
+    await requestWindowsProcessStop({
+      dataDir: options.dataDir,
+      kind: "runtime",
+      pid,
+      instanceId,
+    });
+  } else {
+    signal(pid, "SIGTERM");
+  }
   const timeoutMs = options.timeoutMs ?? 15_000;
   const deadline = Date.now() + timeoutMs;
   // The process exiting is the authoritative stop signal. The receipt files

@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, type Dirent, type Stats } from "node:fs";
 import {
   access,
-  chmod,
   type FileHandle,
   lstat,
   mkdir,
@@ -59,6 +58,7 @@ import {
   removeDshServer,
 } from "./dsh-patch.js";
 import { MCP_TOOLSET_KEY, MCP_TOOLSET_VERSION } from "./mcp-toolset.js";
+import { assertWindowsWritablePath } from "./private-storage.js";
 import {
   RECALL_PRESENTATION_GUIDANCE,
   RECALL_PRESENTATION_GUIDANCE_ZH,
@@ -3645,8 +3645,6 @@ async function assertAncestryUnchanged(
   }
 }
 
-const CONTAINMENT_MODE = 0o600;
-
 /** Capture the canonical containment root and its identity. */
 /** A completed mutation, recorded so cleanup can undo exactly what happened.
  *
@@ -3993,9 +3991,7 @@ async function writeLeafNoFollow(
   mode: number,
   onWritten?: () => void,
 ): Promise<void> {
-  // Fail closed if the platform cannot do a no-follow open. Silently dropping
-  // O_NOFOLLOW would reopen the exact hole this fix closes.
-  if (constants.O_NOFOLLOW === undefined) {
+  if (constants.O_NOFOLLOW === undefined && process.platform !== "win32") {
     throw new UnsafeManagedPathError(
       "write",
       target,
@@ -4006,6 +4002,7 @@ async function writeLeafNoFollow(
   // Validate the parent directory (must exist, no symlink ancestry); the leaf
   // itself may be missing on a create or a regular file being replaced.
   const parent = path.dirname(target);
+  await assertWindowsWritablePath(parent, "directory");
   const parentSnapshot = await snapshotAncestry("write", layout, parent);
   if (parentSnapshot.missingTail.length > 0) {
     throw new UnsafeManagedPathError(
@@ -4019,12 +4016,11 @@ async function writeLeafNoFollow(
   const snapshot = await snapshotAncestry("write", layout, target);
   // The leaf's own identity, when it exists, is what the write must land on.
   const plannedLeaf = await lstatIdentity(target);
+  if (plannedLeaf) await assertWindowsWritablePath(target, "file");
+  const noFollow = constants.O_NOFOLLOW ?? 0;
   const flags = plannedLeaf
-    ? constants.O_WRONLY | constants.O_NOFOLLOW
-    : constants.O_WRONLY |
-      constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW;
+    ? constants.O_WRONLY | noFollow
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow;
   let handle: FileHandle;
   try {
     handle = await open(target, flags, mode);
@@ -4071,6 +4067,21 @@ async function writeLeafNoFollow(
         snapshot.resolvedParent,
         "leaf identity changed since approval",
       );
+    }
+    if (process.platform === "win32") {
+      const current = await assertWindowsWritablePath(target, "file");
+      if (
+        !current ||
+        current.dev !== opened.dev ||
+        current.ino !== opened.ino
+      ) {
+        throw new UnsafeManagedPathError(
+          "write",
+          target,
+          parent,
+          "leaf identity changed",
+        );
+      }
     }
     await handle.truncate(0);
     await handle.writeFile(content, { encoding: "utf8" });
@@ -4291,7 +4302,7 @@ async function writeLeafExternal(
   mode: number,
   onWritten?: () => void,
 ): Promise<void> {
-  if (constants.O_NOFOLLOW === undefined) {
+  if (constants.O_NOFOLLOW === undefined && process.platform !== "win32") {
     throw new UnsafeManagedPathError(
       "write-config",
       targetPath,
@@ -4299,13 +4310,13 @@ async function writeLeafExternal(
       "O_NOFOLLOW is unavailable on this platform",
     );
   }
+  await assertWindowsWritablePath(path.dirname(targetPath), "directory");
   const plannedLeaf = await lstatIdentity(targetPath);
+  if (plannedLeaf) await assertWindowsWritablePath(targetPath, "file");
+  const noFollow = constants.O_NOFOLLOW ?? 0;
   const flags = plannedLeaf
-    ? constants.O_WRONLY | constants.O_NOFOLLOW
-    : constants.O_WRONLY |
-      constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW;
+    ? constants.O_WRONLY | noFollow
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow;
   let handle: FileHandle;
   try {
     handle = await open(targetPath, flags, mode);
@@ -4349,6 +4360,21 @@ async function writeLeafExternal(
         path.dirname(targetPath),
         "config identity changed since approval",
       );
+    }
+    if (process.platform === "win32") {
+      const current = await assertWindowsWritablePath(targetPath, "file");
+      if (
+        !current ||
+        current.dev !== opened.dev ||
+        current.ino !== opened.ino
+      ) {
+        throw new UnsafeManagedPathError(
+          "write-config",
+          targetPath,
+          path.dirname(targetPath),
+          "config identity changed",
+        );
+      }
     }
     await handle.truncate(0);
     await handle.writeFile(content, { encoding: "utf8" });
