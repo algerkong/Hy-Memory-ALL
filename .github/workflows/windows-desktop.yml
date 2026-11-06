@@ -58,8 +58,10 @@ jobs:
       - name: Build self-contained Windows desktop
         run: pnpm package:win:dir
       - name: Verify packaged window, restart and graceful shutdown
+        timeout-minutes: 15
         env:
           ONE_MEMORY_TEST_TEMP_ROOT: ${{ runner.temp }}
+          DEBUG: pw:browser*
         run: >-
           pnpm test:windows:packaged
           --app build/windows-desktop/win-unpacked/MemHub.exe
@@ -67,8 +69,10 @@ jobs:
       - name: Package the verified app as a per-user NSIS installer
         run: pnpm package:win --prepackaged
       - name: Verify real installer and uninstall data preservation
+        timeout-minutes: 15
         env:
           ONE_MEMORY_TEST_TEMP_ROOT: ${{ runner.temp }}
+          DEBUG: pw:browser*
         run: |
           $receipt = Get-Content build/windows-desktop/windows-build-receipt.json -Raw | ConvertFrom-Json
           pnpm test:windows:packaged --installer "build/windows-desktop/$($receipt.installer.filename)" --output build/windows-desktop/evidence/installed

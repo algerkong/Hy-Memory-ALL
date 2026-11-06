@@ -35,6 +35,39 @@ const { resolveBuildVersion, resolveBuildNumber } = require(
   path.join(root, "scripts/release-version.cjs"),
 );
 
+export async function runWindowsSmokeStep(
+  phase,
+  step,
+  action,
+  { events = [], timeout = 30_000 } = {},
+) {
+  const started = Date.now();
+  const event = { phase, step, result: "running" };
+  events.push(event);
+  process.stdout.write(`[windows-smoke] ${phase}:${step}\n`);
+  let timer;
+  try {
+    const result = await Promise.race([
+      Promise.resolve().then(action),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`windows_smoke_timeout:${phase}:${step}`)),
+          timeout,
+        );
+      }),
+    ]);
+    event.result = "passed";
+    return result;
+  } catch (error) {
+    event.result = "failed";
+    event.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    event.duration_ms = Date.now() - started;
+  }
+}
+
 async function waitFor(check, message, timeout = 120_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -137,12 +170,14 @@ async function waitForRenderer(page) {
 
 async function quit(application, page, state, dataDir) {
   const closed = application.waitForEvent("close", { timeout: 45_000 });
-  await page
-    .evaluate(() => window.oneMemory.requestQuit(true))
-    .catch((error) => {
-      if (!/closed|destroyed/i.test(error.message)) throw error;
-    });
-  await closed;
+  await Promise.all([
+    closed,
+    page
+      .evaluate(() => window.oneMemory.requestQuit(true))
+      .catch((error) => {
+        if (!/closed|destroyed/i.test(error.message)) throw error;
+      }),
+  ]);
   await waitFor(
     async () => {
       const names = [
@@ -173,91 +208,144 @@ async function quit(application, page, state, dataDir) {
     throw new Error("windows_desktop_exit_code_nonzero");
 }
 
-async function verifyLaunch(executable, env, output, phase, exerciseWindow) {
-  const application = await electron.launch({
-    executablePath: executable,
-    env,
-    timeout: 120_000,
-  });
+async function verifyLaunch(
+  executable,
+  env,
+  output,
+  phase,
+  exerciseWindow,
+  events,
+) {
+  const step = (name, action, timeout) =>
+    runWindowsSmokeStep(phase, name, action, { events, timeout });
+  let application;
   const errors = [];
   const watch = (page) =>
     page.on("pageerror", (error) => errors.push(error.message));
-  for (const current of application.context().pages()) watch(current);
-  application.context().on("page", watch);
   let page;
   let state;
   try {
-    page = await application.firstWindow({ timeout: 120_000 });
-    state = await runtimeReady(env.ONE_MEMORY_DATA_DIR);
-    await waitForRenderer(page);
-    const build = await page.evaluate(() => window.oneMemory.getBuildInfo());
+    application = await step(
+      "electron-launch",
+      () =>
+        electron.launch({
+          executablePath: executable,
+          env,
+          timeout: 120_000,
+        }),
+      130_000,
+    );
+    for (const current of application.context().pages()) watch(current);
+    application.context().on("page", watch);
+    page = await step(
+      "first-window",
+      () => application.firstWindow({ timeout: 120_000 }),
+      130_000,
+    );
+    state = await step(
+      "runtime-ready",
+      () => runtimeReady(env.ONE_MEMORY_DATA_DIR),
+      190_000,
+    );
+    await step("renderer-ready", () => waitForRenderer(page), 130_000);
+    const build = await step("build-identity", () =>
+      page.evaluate(() => window.oneMemory.getBuildInfo()),
+    );
     if (
       build.version !== resolveBuildVersion() ||
       build.buildNumber !== String(resolveBuildNumber())
     ) {
       throw new Error("windows_renderer_build_identity_mismatch");
     }
-    const base = await page.evaluate(() => window.oneMemory.getApiBaseUrl());
+    const base = await step("api-port", () =>
+      page.evaluate(() => window.oneMemory.getApiBaseUrl()),
+    );
     if (base !== `http://127.0.0.1:${state.receipt.core_port}`) {
       throw new Error("windows_renderer_core_port_mismatch");
     }
-    const startup = await page.evaluate(() =>
-      window.oneMemory.getLoginPreference(),
+    const startup = await step("login-preference", () =>
+      page.evaluate(() => window.oneMemory.getLoginPreference()),
     );
     if (startup.enabled)
       throw new Error("windows_isolated_startup_was_enabled");
-    const capability = await page.evaluate(() =>
-      window.oneMemory.getConnectionSetupCapability(),
+    const capability = await step("connection-capability", () =>
+      page.evaluate(() => window.oneMemory.getConnectionSetupCapability()),
     );
     if (!capability.available)
       throw new Error("windows_connection_setup_not_available");
-    const preference = await page.evaluate(() =>
-      window.oneMemory.getLanguagePreference(),
+    const preference = await step("language-preference", () =>
+      page.evaluate(() => window.oneMemory.getLanguagePreference()),
     );
     if (phase === "first-launch") {
-      await page.evaluate(() => window.oneMemory.setLanguagePreference("en"));
-      const response = await fetch(`${base}/api/v1/backup`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${state.token}`,
-          "Content-Type": "application/json",
+      await step("save-language-preference", () =>
+        page.evaluate(() => window.oneMemory.setLanguagePreference("en")),
+      );
+      await step(
+        "database-backup",
+        async () => {
+          const response = await fetch(`${base}/api/v1/backup`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${state.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ target: "backups/windows-smoke.sqlite3" }),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!response.ok)
+            throw new Error(
+              `windows_database_backup_failed:${response.status}`,
+            );
+          if ((await response.json()).bytes <= 0)
+            throw new Error("windows_database_backup_empty");
         },
-        body: JSON.stringify({ target: "backups/windows-smoke.sqlite3" }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok)
-        throw new Error(`windows_database_backup_failed:${response.status}`);
-      if ((await response.json()).bytes <= 0)
-        throw new Error("windows_database_backup_empty");
+        40_000,
+      );
     } else if (preference.preference !== "en") {
       throw new Error("windows_language_preference_not_preserved");
     }
     if (exerciseWindow) {
-      await application.evaluate(({ BrowserWindow }) => {
-        for (const window of BrowserWindow.getAllWindows()) window.close();
-      });
+      await step("close-window", () =>
+        application.evaluate(({ BrowserWindow }) => {
+          for (const window of BrowserWindow.getAllWindows()) window.close();
+        }),
+      );
       if (!alive(state.receipt.pid) || !alive(state.corePid)) {
         throw new Error("windows_window_close_stopped_runtime");
       }
-      const reopened = application.waitForEvent("window", { timeout: 30_000 });
-      await runCommand(executable, [], { env, timeout: 20_000 });
-      page = await reopened;
-      await waitForRenderer(page);
-    }
-    await page.screenshot({ path: path.join(output, `${phase}.png`) });
-    const pixels = await application.evaluate(async ({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows().find((candidate) =>
-        candidate.isVisible(),
+      [page] = await step(
+        "restore-window",
+        () =>
+          Promise.all([
+            application.waitForEvent("window", { timeout: 30_000 }),
+            runCommand(executable, [], { env, timeout: 20_000 }),
+          ]),
+        40_000,
       );
-      if (!window) throw new Error("windows_no_visible_window");
-      const image = await window.webContents.capturePage();
-      const bitmap = image.toBitmap();
-      const colors = new Set();
-      for (let index = 0; index < bitmap.length; index += 64) {
-        colors.add(bitmap.subarray(index, index + 3).toString("hex"));
-      }
-      return { ...image.getSize(), sampled_colors: colors.size };
-    });
+      await step(
+        "restored-renderer-ready",
+        () => waitForRenderer(page),
+        130_000,
+      );
+    }
+    await step("screenshot", () =>
+      page.screenshot({ path: path.join(output, `${phase}.png`) }),
+    );
+    const pixels = await step("window-pixels", () =>
+      application.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows().find((candidate) =>
+          candidate.isVisible(),
+        );
+        if (!window) throw new Error("windows_no_visible_window");
+        const image = await window.webContents.capturePage();
+        const bitmap = image.toBitmap();
+        const colors = new Set();
+        for (let index = 0; index < bitmap.length; index += 64) {
+          colors.add(bitmap.subarray(index, index + 3).toString("hex"));
+        }
+        return { ...image.getSize(), sampled_colors: colors.size };
+      }),
+    );
     if (
       pixels.width < 600 ||
       pixels.height < 400 ||
@@ -267,7 +355,11 @@ async function verifyLaunch(executable, env, output, phase, exerciseWindow) {
     }
     if (errors.length)
       throw new Error(`windows_renderer_errors:${errors.join(";")}`);
-    await quit(application, page, state, env.ONE_MEMORY_DATA_DIR);
+    await step(
+      "graceful-shutdown",
+      () => quit(application, page, state, env.ONE_MEMORY_DATA_DIR),
+      90_000,
+    );
     return {
       phase,
       result: "passed",
@@ -281,25 +373,39 @@ async function verifyLaunch(executable, env, output, phase, exerciseWindow) {
       startup_setting: "not-modified",
     };
   } catch (error) {
+    if (!application) throw error;
     if (page && !page.isClosed()) {
-      await page
-        .screenshot({ path: path.join(output, `${phase}-failure.png`) })
-        .catch(() => {});
+      await step(
+        "failure-screenshot",
+        () =>
+          page.screenshot({
+            path: path.join(output, `${phase}-failure.png`),
+            timeout: 5_000,
+          }),
+        10_000,
+      ).catch(() => {});
     }
-    await Promise.race([
-      application.close().catch(() => {}),
-      delay(10_000).then(() => application.process().kill()),
-    ]);
-    await runCommand(
-      executable,
-      [
-        path.join(path.dirname(executable), "resources/runtime/runtime.cjs"),
-        "stop",
-      ],
-      {
-        env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
-        timeout: 30_000,
-      },
+    await step("failure-close", () => application.close(), 10_000).catch(() =>
+      application.process().kill(),
+    );
+    await step(
+      "failure-runtime-stop",
+      () =>
+        runCommand(
+          executable,
+          [
+            path.join(
+              path.dirname(executable),
+              "resources/runtime/runtime.cjs",
+            ),
+            "stop",
+          ],
+          {
+            env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
+            timeout: 30_000,
+          },
+        ),
+      35_000,
     ).catch(() => {});
     throw error;
   }
@@ -357,6 +463,7 @@ export async function smokeWindowsDesktop(options) {
     runner_os_release: os.release(),
     signing: "unsigned",
     phases: [],
+    steps: [],
     result: "failed",
   };
   try {
@@ -390,7 +497,14 @@ export async function smokeWindowsDesktop(options) {
       throw new Error("windows_smoke_executable_missing");
     }
     receipt.phases.push(
-      await verifyLaunch(executable, env, output, "first-launch", true),
+      await verifyLaunch(
+        executable,
+        env,
+        output,
+        "first-launch",
+        true,
+        receipt.steps,
+      ),
     );
     const backup = path.join(
       env.ONE_MEMORY_DATA_DIR,
@@ -398,7 +512,14 @@ export async function smokeWindowsDesktop(options) {
     );
     const hash = await sha256File(backup);
     receipt.phases.push(
-      await verifyLaunch(executable, env, output, "relaunch", false),
+      await verifyLaunch(
+        executable,
+        env,
+        output,
+        "relaunch",
+        false,
+        receipt.steps,
+      ),
     );
     if (
       receipt.phases[0].instance_id === receipt.phases[1].instance_id ||
@@ -487,8 +608,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     (error) => {
       process.stderr.write(
         `${error instanceof Error ? error.message : error}\n`,
+        () => process.exit(1),
       );
-      process.exitCode = 1;
     },
   );
 }
