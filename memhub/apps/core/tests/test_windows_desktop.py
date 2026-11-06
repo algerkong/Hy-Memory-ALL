@@ -14,7 +14,11 @@ import pytest
 
 from one_memory.config import Settings
 from one_memory.database_access import main_database
-from one_memory.file_imports import FileImportStore
+from one_memory.file_imports import (
+    FileImportOperationUnavailable,
+    FileImportStore,
+    _read_private_record,
+)
 from one_memory.imports import access
 from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError
 from one_memory.imports.snapshots import SnapshotLimits, SnapshotMode, SourceSnapshotStore
@@ -95,6 +99,7 @@ def test_native_private_paths_and_root_refusal(tmp_path):
     token.write_text("private", encoding="utf-8")
     assert_private_path(directory, directory=True)
     assert_private_path(token, directory=False)
+    assert _read_private_record(token) == b"private"
     with pytest.raises(OSError, match="path_invalid"):
         protect_private_path(Path(directory.anchor), directory=True)
 
@@ -180,7 +185,11 @@ def test_native_file_import_keeps_operation_receipts_across_confirmation(tmp_pat
     store = FileImportStore(tmp_path / "imports")
     operation = str(uuid4())
     payload = json.dumps(chatgpt_export()).encode()
-    receipt = store.prepare(payload, "chat.json", operation_id=operation)
+    try:
+        receipt = store.prepare(payload, "chat.json", operation_id=operation)
+    except FileImportOperationUnavailable as error:
+        # This fixture is synthetic; expose its original error in native CI.
+        raise error.__context__ or error from None
     assert receipt.state == "completed"
     assert receipt.upload_id is not None
     assert store.commit(receipt.upload_id).committed

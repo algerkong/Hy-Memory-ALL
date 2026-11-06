@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { protectWindowsPrivatePath } from "@one-memory/host-bridge";
@@ -21,7 +21,12 @@ function fakeChild(): ChildProcess {
 async function writeService(dataDir: string) {
   await mkdir(dataDir, { recursive: true });
   await protectWindowsPrivatePath(dataDir, "directory");
-  await writeFile(
+  const publish = async (target: string, contents: string) => {
+    const temporary = `${target}.pending`;
+    await writeFile(temporary, contents, { mode: 0o600 });
+    await rename(temporary, target);
+  };
+  await publish(
     path.join(dataDir, "runtime.json"),
     JSON.stringify({
       schema_version: 1,
@@ -34,10 +39,8 @@ async function writeService(dataDir: string) {
       started_at: "now",
     }),
   );
-  await writeFile(path.join(dataDir, "runtime-token"), "token", {
-    mode: 0o600,
-  });
-  await writeFile(
+  await publish(path.join(dataDir, "runtime-token"), "token");
+  await publish(
     path.join(dataDir, "runtime-service.json"),
     JSON.stringify({
       schema_version: 1,
@@ -48,7 +51,6 @@ async function writeService(dataDir: string) {
       core_port: 8765,
       started_at: "now",
     }),
-    { mode: 0o600 },
   );
 }
 
